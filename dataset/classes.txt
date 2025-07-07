@@ -1,0 +1,4 @@
+cone
+line
+road
+parking_sign
