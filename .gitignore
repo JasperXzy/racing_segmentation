@@ -8,3 +8,6 @@
 *.mp4
 *.avi
 *.mkv
+
+* model train
+runs/
