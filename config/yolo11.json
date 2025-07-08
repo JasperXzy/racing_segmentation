@@ -1,0 +1,16 @@
+{
+	"model_file": "config/yolo11-seg.bin",
+	"class_num": 4,
+	"dnn_Parser": "yolo11-seg",
+	"cls_names_list": ["cone", "line", "road", "parking_sign"],
+	"preprocess_type": 1,
+	"nms_threshold": 0.5,
+	"score_threshold": 0.25,
+	"nms_top_k": 300,
+	"reg": 16,
+    "mces": 32,
+    "is_point": 1,
+	"font_size": 1.0,
+	"font_thickness": 1.0,
+	"line_size": 2.0
+}
