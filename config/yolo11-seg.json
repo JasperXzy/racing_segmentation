@@ -9,7 +9,7 @@
 	"nms_top_k": 300,
 	"reg": 16,
     "mces": 32,
-    "is_point": 1,
+    "is_point": true,
 	"font_size": 1.0,
 	"font_thickness": 1.0,
 	"line_size": 2.0

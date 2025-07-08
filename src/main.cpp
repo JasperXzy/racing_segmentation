@@ -1,2 +1,10 @@
 #include "racing_segmentation/parser.hpp"
 #include "racing_segmentation/image_utils.hpp"
+
+int main()
+{
+    RacingSegmentation racing_segmentation;
+    racing_segmentation.load_config();
+
+    return 0;
+}

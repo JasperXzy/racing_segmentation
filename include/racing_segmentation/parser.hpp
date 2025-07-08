@@ -45,6 +45,6 @@ private:
 
 
     int rdk_check_success(int value, const std::string &errmsg);
-}
+};
 
 #endif // PARSER_H

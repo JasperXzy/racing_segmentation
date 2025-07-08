@@ -1,6 +1,6 @@
 #include "racing_segmentation/parser.hpp"
 
-int RacingObstacleDetection::rdk_check_success(int value, const std::string &errmsg)
+int RacingSegmentation::rdk_check_success(int value, const std::string &errmsg)
 {
     if (value != 0)
     {
@@ -10,7 +10,7 @@ int RacingObstacleDetection::rdk_check_success(int value, const std::string &err
     return 0;
 }
 
-int RacingObstacleDetection::load_config()
+int RacingSegmentation::load_config()
 {
     std::cout << "================================================" << std::endl;
     std::cout << "[INFO] Loading Configuration From config/yolo11-seg.json" << std::endl;
