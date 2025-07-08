@@ -1,2 +1,1 @@
-#include "racing_segmentation/parser.hpp"
 #include "racing_segmentation/image_utils.hpp"
