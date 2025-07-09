@@ -26,6 +26,7 @@ class RacingSegmentation
 {
 public:
     int load_config();
+    int load_bin_model();
 
 private:
     std::string model_file;
