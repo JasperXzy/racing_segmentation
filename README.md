@@ -1,10 +1,21 @@
-## 修改优化后的 Attention 模块 
+## 编译运行
+
+```bash
+colcon build --packages-select racing_segmentation
+```
+
+```bash
+source install/setup.bash
+ros2 launch racing_segmentation racing_segmentation.launch.py
+```
+
+## 修改优化后的 Attention 类
 
 文件目录：`ultralytics/nn/modules/block.py`，`Attention`类的`forward`方法替换成以下内容。
 
 ```python
 class AAttn(nn.Module):
-    def forward(self, x):  # RDK
+    def forward(self, x):  # RDK X5
         print(f"{x.shape = }")
         B, C, H, W = x.shape
         N = H * W
