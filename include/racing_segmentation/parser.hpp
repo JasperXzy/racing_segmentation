@@ -8,7 +8,6 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
-
 #include <opencv2/opencv.hpp>
 #include <opencv2/dnn/dnn.hpp>
 #include <nlohmann/json.hpp>
@@ -16,6 +15,9 @@
 #include "dnn/hb_dnn_ext.h"
 #include "dnn/hb_sys.h"
 #include <omp.h>
+#include "ai_msgs/msg/perception_targets.hpp"
+#include "geometry_msgs/msg/point32.hpp"
+#include "sensor_msgs/msg/region_of_interest.hpp"
 
 // DetectionResult 只存储最终在原始图像上的坐标
 struct DetectionResult {
@@ -35,6 +37,7 @@ public:
     int load_config();
     int load_bin_model();
     int detect(uint8_t* ynv12, int original_w, int original_h, std::vector<DetectionResult>& results);
+    void convert_to_ros_msg(const std::vector<DetectionResult>& results, ai_msgs::msg::PerceptionTargets& msg) const;
     int release_model();
 
 private:

@@ -785,6 +785,46 @@ int RacingSegmentation::detect(uint8_t* ynv12, int original_w, int original_h, s
     return 0;
 }
 
+void RacingSegmentation::convert_to_ros_msg(const std::vector<DetectionResult>& results, ai_msgs::msg::PerceptionTargets& msg) const
+{
+    msg.targets.clear();
+    for (const auto& det_res : results) {
+        ai_msgs::msg::Target target;
+        target.type = det_res.class_name;
+
+        // 填充边界框信息
+        ai_msgs::msg::Roi roi;
+        roi.rect.x_offset = static_cast<uint32_t>(det_res.box.x);
+        roi.rect.y_offset = static_cast<uint32_t>(det_res.box.y);
+        roi.rect.width = static_cast<uint32_t>(det_res.box.width);
+        roi.rect.height = static_cast<uint32_t>(det_res.box.height);
+        roi.confidence = det_res.score;
+        target.rois.push_back(roi);
+
+        // 填充分割掩码轮廓信息
+        if (!det_res.mask.empty()) {
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(det_res.mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+            for (const auto& contour : contours) {
+                ai_msgs::msg::Point point_set;
+                point_set.type = "segmentation_contour";
+                
+                for (const auto& cv_point : contour) {
+                    geometry_msgs::msg::Point32 ros_point;
+                    ros_point.x = static_cast<float>(cv_point.x);
+                    ros_point.y = static_cast<float>(cv_point.y);
+                    ros_point.z = 0.0f;
+                    point_set.point.push_back(ros_point);
+                }
+                target.points.push_back(point_set);
+            }
+        }
+        
+        msg.targets.push_back(target);
+    }
+}
+
 int RacingSegmentation::release_model()
 {
     std::cout << "[INFO] Releasing model..." << std::endl;
