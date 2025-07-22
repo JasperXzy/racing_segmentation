@@ -10,4 +10,6 @@ void letterbox_nv12(const uint8_t* nv12, int src_w, int src_h,
                     uint8_t* out_nv12, int dst_w, int dst_h,
                     int& x_shift, int& y_shift, float& x_scale, float& y_scale);
 
+cv::Mat image_to_nv12(const std::string& image_path, int target_width, int target_height);
+
 #endif // IMAGE_UTILS_H

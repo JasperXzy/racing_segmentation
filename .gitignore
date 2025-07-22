@@ -9,8 +9,8 @@
 *.avi
 *.mkv
 
-# model train
 runs/
+build/
 
 *.pt
 *.bin

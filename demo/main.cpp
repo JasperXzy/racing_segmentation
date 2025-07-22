@@ -24,11 +24,11 @@ limitations under the License.
 
 // D-Robotics *.bin 模型路径
 // Path of D-Robotics *.bin model.
-#define MODEL_PATH "yolo11n_seg_bayese_640x640_nv12_modified.bin"
+#define MODEL_PATH "/userdata/racing_ws/src/racing_segmentation/config/yolo11_seg.bin"
 
 // 推理使用的测试图片路径
 // Path of the test image used for inference.
-#define TESR_IMG_PATH "../../../../../../resource/datasets/COCO2017/assets/bus.jpg"
+#define TESR_IMG_PATH "/userdata/racing_ws/src/racing_segmentation/demo/test.jpg"
 
 // 前处理方式选择, 0:Resize, 1:LetterBox
 // Preprocessing method selection, 0: Resize, 1: LetterBox
@@ -38,11 +38,11 @@ limitations under the License.
 
 // 推理结果保存路径
 // Path where the inference result will be saved
-#define IMG_SAVE_PATH "cpp_result.jpg"
+#define IMG_SAVE_PATH "/userdata/racing_ws/src/racing_segmentation/demo/test_result.jpg"
 
 // 模型的类别数量, 默认80
 // Number of classes in the model, default is 80
-#define CLASSES_NUM 1
+#define CLASSES_NUM 4
 
 // NMS的阈值, 默认0.45
 // Non-Maximum Suppression (NMS) threshold, default is 0.45
