@@ -82,7 +82,6 @@ int RacingSegmentation::load_bin_model()
 
     // 1. 加载bin模型
     auto begin_time = std::chrono::system_clock::now();
-    hbPackedDNNHandle_t packed_dnn_handle;
     const char *model_file_name = model_file.c_str();
     rdk_check_success(
         hbDNNInitializeFromFiles(&packed_dnn_handle, &model_file_name, 1),
@@ -105,7 +104,6 @@ int RacingSegmentation::load_bin_model()
     std::cout << "[INFO] Model Name: " << model_name << std::endl;
 
     // 3. 获得Packed模型的第一个模型的handle
-    hbDNNHandle_t dnn_handle;
     rdk_check_success(
         hbDNNGetModelHandle(&dnn_handle, packed_dnn_handle, model_name),
         "hbDNNGetModelHandle failed");
@@ -116,7 +114,6 @@ int RacingSegmentation::load_bin_model()
         hbDNNGetInputCount(&input_count, dnn_handle),
         "hbDNNGetInputCount failed");
 
-    hbDNNTensorProperties input_properties;
     rdk_check_success(
         hbDNNGetInputTensorProperties(&input_properties, dnn_handle, 0),
         "hbDNNGetInputTensorProperties failed");
@@ -151,7 +148,6 @@ int RacingSegmentation::load_bin_model()
     }
 
     // 4.4. D-Robotics YOLO11-Seg *.bin 模型输入Tensor数据的valid shape应为(1,3,H,W)
-    int32_t input_H, input_W;
     if (input_properties.validShape.numDimensions == 4)
     {
         input_H = input_properties.validShape.dimensionSize[2];
@@ -168,7 +164,6 @@ int RacingSegmentation::load_bin_model()
     }
 
     // 5. 模型输出检查
-    int32_t output_count = 0;
     rdk_check_success(
         hbDNNGetOutputCount(&output_count, dnn_handle),
         "hbDNNGetOutputCount failed");
@@ -202,15 +197,6 @@ int RacingSegmentation::load_bin_model()
     }
 
     // 6. 调整输出头顺序的映射
-    int order[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-    int32_t H_4 = input_H / 4;
-    int32_t H_8 = input_H / 8;
-    int32_t H_16 = input_H / 16;
-    int32_t H_32 = input_H / 32;
-    int32_t W_4 = input_W / 4;
-    int32_t W_8 = input_W / 8;
-    int32_t W_16 = input_W / 16;
-    int32_t W_32 = input_W / 32;
     int32_t order_we_want[10][3] = {
         {H_8, W_8, class_num},      // output[order[0]]: (1, H // 8,  W // 8,  class_num)
         {H_8, W_8, 4 * reg},        // output[order[1]]: (1, H // 8,  W // 8,  64)
@@ -294,33 +280,27 @@ int RacingSegmentation::detect(uint8_t* ynv12)
     hbDNNInfer(&task_handle, &output, &input, dnn_handle, &infer_ctrl_param);
     hbDNNWaitTaskDone(task_handle, 0);
 
-    return 0;
-}
-
-int RacingSegmentation::postprocessing()
-{
-    // YOLO11-Seg-Detect 后处理
+    // 后处理
     float CONF_THRES_RAW = -log(1 / score_threshold - 1);               // 利用反函数作用阈值，利用单调性筛选
     std::vector<std::vector<cv::Rect2d>> bboxes(class_num);             // 每个id的xyhw 信息使用一个std::vector<cv::Rect2d>存储
     std::vector<std::vector<float>> scores(class_num);                  // 每个id的score信息使用一个std::vector<float>存储
     std::vector<std::vector<std::vector<float>>> maskes(class_num);     // 每个id的mask信息使用一个std::vector<std::vector>存储
 
-    // 1.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    // 4.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[9]].properties.quantiType != SCALE)
     {
         std::cout << "[Error] output[order[9]] QuantiType is not SCALE, please check!" << std::endl;
         return -1;
     }
 
-    // 1.2 对缓存的BPU内存进行刷新
+    // 4.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[9]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
-    // 1.3 将BPU推理完的内存地址转换为对应类型的指针
+    // 4.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *proto_data = reinterpret_cast<int16_t *>(output[order[9]].sysMem[0].virAddr);
     float proto_scale_data = output[order[9]].properties.scale.scaleData[0];
 
-    // 1.4 反量化
-    begin_time = std::chrono::system_clock::now();
+    // 4.4 反量化
     std::vector<float> proto(H_4 * W_4 * mces);
 
     for (int h = 0; h < H_4; h++)
@@ -336,12 +316,12 @@ int RacingSegmentation::postprocessing()
         }
     }
 
-    // 2. 小目标特征图
+    // 5. 小目标特征图
     // output[order[0]]: (1, H // 8,  W // 8,  class_num)
     // output[order[1]]: (1, H // 8,  W // 8,  4 * reg)
     // output[order[2]]: (1, H // 8,  W // 8,  mces)
 
-    // 2.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    // 5.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[0]].properties.quantiType != NONE)
     {
         std::cout << "[Error] output[order[0]] QuantiType is not NONE, please check!" << std::endl;
@@ -358,12 +338,12 @@ int RacingSegmentation::postprocessing()
         return -1;
     }
 
-    // 2.2 对缓存的BPU内存进行刷新
+    // 5.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[0]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[1]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[2]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
-    // 2.3 将BPU推理完的内存地址转换为对应类型的指针
+    // 5.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *s_cls_raw = reinterpret_cast<float *>(output[order[0]].sysMem[0].virAddr);
     auto *s_bbox_raw = reinterpret_cast<int32_t *>(output[order[1]].sysMem[0].virAddr);
     auto *s_bbox_scale = reinterpret_cast<float *>(output[order[1]].properties.scale.scaleData);
@@ -373,14 +353,14 @@ int RacingSegmentation::postprocessing()
     {
         for (int w = 0; w < W_8; w++)
         {
-            // 2.4 取对应H和W位置的C通道, 记为数组的形式
+            // 5.4 取对应H和W位置的C通道, 记为数组的形式
             // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
             // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
             float *cur_s_cls_raw = s_cls_raw;
             int32_t *cur_s_bbox_raw = s_bbox_raw;
             int32_t *cur_s_mces_raw = s_mces_raw;
 
-            // 2.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            // 5.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
             int cls_id = 0;
             for (int i = 1; i < class_num; i++)
             {
@@ -390,7 +370,7 @@ int RacingSegmentation::postprocessing()
                 }
             }
 
-            // 2.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            // 5.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
             if (cur_s_cls_raw[cls_id] < CONF_THRES_RAW)
             {
                 s_cls_raw += class_num;
@@ -399,10 +379,10 @@ int RacingSegmentation::postprocessing()
                 continue;
             }
 
-            // 2.7 计算这个目标的分数
+            // 5.7 计算这个目标的分数
             float score = 1 / (1 + std::exp(-cur_s_cls_raw[cls_id]));
 
-            // 2.8 对bbox_raw信息进行反量化, DFL计算
+            // 5.8 对bbox_raw信息进行反量化, DFL计算
             float ltrb[4], sum, dfl;
             for (int i = 0; i < 4; i++)
             {
@@ -418,7 +398,7 @@ int RacingSegmentation::postprocessing()
                 ltrb[i] /= sum;
             }
 
-            // 2.9 剔除不合格的框
+            // 5.9 剔除不合格的框
             if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
             {
                 s_cls_raw += class_num;
@@ -427,13 +407,13 @@ int RacingSegmentation::postprocessing()
                 continue;
             }
 
-            // 2.10 dist 2 bbox (ltrb 2 xyxy)
+            // 5.10 dist 2 bbox (ltrb 2 xyxy)
             float x1 = (w + 0.5 - ltrb[0]) * 8.0;
             float y1 = (h + 0.5 - ltrb[1]) * 8.0;
             float x2 = (w + 0.5 + ltrb[2]) * 8.0;
             float y2 = (h + 0.5 + ltrb[3]) * 8.0;
 
-            // 2.11 对应类别加入到对应的std::vector中
+            // 5.11 对应类别加入到对应的std::vector中
             bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
             scores[cls_id].push_back(score);
 
@@ -451,12 +431,12 @@ int RacingSegmentation::postprocessing()
         }
     }
 
-    // 3. 中目标特征图
+    // 6. 中目标特征图
     // output[order[3]]: (1, H // 16,  W // 16,  class_num)
     // output[order[4]]: (1, H // 16,  W // 16,  4 * reg)
     // output[order[5]]: (1, H // 16,  W // 16,  mces)
 
-    // 3.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    // 6.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[3]].properties.quantiType != NONE)
     {
         std::cout << "[Error] output[order[3]] QuantiType is not NONE, please check!" << std::endl;
@@ -473,12 +453,12 @@ int RacingSegmentation::postprocessing()
         return -1;
     }
 
-    // 3.2 对缓存的BPU内存进行刷新
+    // 6.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[3]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[4]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[5]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
-    // 3.3 将BPU推理完的内存地址转换为对应类型的指针
+    // 6.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *m_cls_raw = reinterpret_cast<float *>(output[order[3]].sysMem[0].virAddr);
     auto *m_bbox_raw = reinterpret_cast<int32_t *>(output[order[4]].sysMem[0].virAddr);
     auto *m_bbox_scale = reinterpret_cast<float *>(output[order[4]].properties.scale.scaleData);
@@ -489,14 +469,14 @@ int RacingSegmentation::postprocessing()
     {
         for (int w = 0; w < W_16; w++)
         {
-            // 3.4 取对应H和W位置的C通道, 记为数组的形式
+            // 6.4 取对应H和W位置的C通道, 记为数组的形式
             // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
             // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
             float *cur_m_cls_raw = m_cls_raw;
             int32_t *cur_m_bbox_raw = m_bbox_raw;
             int32_t *cur_m_mces_raw = m_mces_raw;
 
-            // 3.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            // 6.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
             int cls_id = 0;
             for (int i = 1; i < class_num; i++)
             {
@@ -506,7 +486,7 @@ int RacingSegmentation::postprocessing()
                 }
             }
 
-            // 3.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            // 6.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
             if (cur_m_cls_raw[cls_id] < CONF_THRES_RAW)
             {
                 m_cls_raw += class_num;
@@ -515,10 +495,10 @@ int RacingSegmentation::postprocessing()
                 continue;
             }
 
-            // 3.7 计算这个目标的分数
+            // 6.7 计算这个目标的分数
             float score = 1 / (1 + std::exp(-cur_m_cls_raw[cls_id]));
 
-            // 3.8 对bbox_raw信息进行反量化, DFL计算
+            // 6.8 对bbox_raw信息进行反量化, DFL计算
             float ltrb[4], sum, dfl;
             for (int i = 0; i < 4; i++)
             {
@@ -534,7 +514,7 @@ int RacingSegmentation::postprocessing()
                 ltrb[i] /= sum;
             }
 
-            // 3.9 剔除不合格的框
+            // 6.9 剔除不合格的框
             if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
             {
                 m_cls_raw += class_num;
@@ -543,13 +523,13 @@ int RacingSegmentation::postprocessing()
                 continue;
             }
 
-            // 3.10 dist 2 bbox (ltrb 2 xyxy)
+            // 6.10 dist 2 bbox (ltrb 2 xyxy)
             float x1 = (w + 0.5 - ltrb[0]) * 16.0;
             float y1 = (h + 0.5 - ltrb[1]) * 16.0;
             float x2 = (w + 0.5 + ltrb[2]) * 16.0;
             float y2 = (h + 0.5 + ltrb[3]) * 16.0;
 
-            // 3.11 对应类别加入到对应的std::vector中
+            // 6.11 对应类别加入到对应的std::vector中
             bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
             scores[cls_id].push_back(score);
 
@@ -567,12 +547,12 @@ int RacingSegmentation::postprocessing()
         }
     }
 
-    // 4. 大目标特征图
+    // 7. 大目标特征图
     // output[order[6]]: (1, H // 32,  W // 32,  class_num)
     // output[order[7]]: (1, H // 32,  W // 32,  4 * reg)
     // output[order[8]]: (1, H // 32,  W // 16,  mces)
 
-    // 4.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    // 7.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[6]].properties.quantiType != NONE)
     {
         std::cout << "[Error] output[order[6]] QuantiType is not NONE, please check!" << std::endl;
@@ -589,12 +569,12 @@ int RacingSegmentation::postprocessing()
         return -1;
     }
 
-    // 4.2 对缓存的BPU内存进行刷新
+    // 7.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[6]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[7]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[8]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
-    // 4.3 将BPU推理完的内存地址转换为对应类型的指针
+    // 7.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *l_cls_raw = reinterpret_cast<float *>(output[order[6]].sysMem[0].virAddr);
     auto *l_bbox_raw = reinterpret_cast<int32_t *>(output[order[7]].sysMem[0].virAddr);
     auto *l_bbox_scale = reinterpret_cast<float *>(output[order[7]].properties.scale.scaleData);
@@ -605,14 +585,14 @@ int RacingSegmentation::postprocessing()
     {
         for (int w = 0; w < W_32; w++)
         {
-            // 4.4 取对应H和W位置的C通道, 记为数组的形式
+            // 7.4 取对应H和W位置的C通道, 记为数组的形式
             // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
             // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
             float *cur_l_cls_raw = l_cls_raw;
             int32_t *cur_l_bbox_raw = l_bbox_raw;
             int32_t *cur_l_mces_raw = l_mces_raw;
 
-            // 4.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            // 7.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
             int cls_id = 0;
             for (int i = 1; i < class_num; i++)
             {
@@ -622,7 +602,7 @@ int RacingSegmentation::postprocessing()
                 }
             }
 
-            // 4.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            // 7.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
             if (cur_l_cls_raw[cls_id] < CONF_THRES_RAW)
             {
                 l_cls_raw += class_num;
@@ -631,10 +611,10 @@ int RacingSegmentation::postprocessing()
                 continue;
             }
 
-            // 4.7 计算这个目标的分数
+            // 7.7 计算这个目标的分数
             float score = 1 / (1 + std::exp(-cur_l_cls_raw[cls_id]));
 
-            // 4.8 对bbox_raw信息进行反量化, DFL计算
+            // 7.8 对bbox_raw信息进行反量化, DFL计算
             float ltrb[4], sum, dfl;
             for (int i = 0; i < 4; i++)
             {
@@ -650,7 +630,7 @@ int RacingSegmentation::postprocessing()
                 ltrb[i] /= sum;
             }
 
-            // 4.9 剔除不合格的框
+            // 7.9 剔除不合格的框
             if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
             {
                 l_cls_raw += class_num;
@@ -659,13 +639,13 @@ int RacingSegmentation::postprocessing()
                 continue;
             }
 
-            // 4.10 dist 2 bbox (ltrb 2 xyxy)
+            // 7.10 dist 2 bbox (ltrb 2 xyxy)
             float x1 = (w + 0.5 - ltrb[0]) * 32.0;
             float y1 = (h + 0.5 - ltrb[1]) * 32.0;
             float x2 = (w + 0.5 + ltrb[2]) * 32.0;
             float y2 = (h + 0.5 + ltrb[3]) * 32.0;
 
-            // 4.11 对应类别加入到对应的std::vector中
+            // 7.11 对应类别加入到对应的std::vector中
             bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
             scores[cls_id].push_back(score);
 
@@ -714,9 +694,6 @@ int RacingSegmentation::postprocessing()
         }
     }
 
-    // 现在开始掩膜处理，记录开始时间
-    begin_time = std::chrono::system_clock::now();
-
     // 9. 进行绘制
     // 9. Drawing
     // 使用已有的rdk_colors变量
@@ -735,7 +712,7 @@ int RacingSegmentation::postprocessing()
             // 绘制边界框
             // Draw bounding box
             cv::rectangle(img_display, nms_bboxes[cls_id][i], cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]), 2);
-            cv::putText(img_display, object_names[cls_id] + ": " + std::to_string(nms_scores[cls_id][i]).substr(0, 5), cv::Point(nms_bboxes[cls_id][i].x, nms_bboxes[cls_id][i].y - 2), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]), 2);
+            cv::putText(img_display, cls_names_list[cls_id] + ": " + std::to_string(nms_scores[cls_id][i]).substr(0, 5), cv::Point(nms_bboxes[cls_id][i].x, nms_bboxes[cls_id][i].y - 2), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]), 2);
 
             // 应用掩码
             // Apply mask

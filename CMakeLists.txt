@@ -14,6 +14,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(OpenMP REQUIRED)
 
 # 设置自定义路径
 set(DNN_PATH "/usr/include/dnn")
@@ -47,6 +48,7 @@ target_link_libraries(${PROJECT_NAME}
   rt
   dl
   nlohmann_json::nlohmann_json
+  OpenMP::OpenMP_CXX
 )
 
 # 安装规则
