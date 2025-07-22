@@ -96,7 +96,7 @@ int RacingSegmentation::load_bin_model()
         hbDNNGetModelNameList(&model_name_list, &model_count, packed_dnn_handle),
         "hbDNNGetModelNameList failed");
 
-    // 如果这个bin模型有多个打包，则只使用第一个，一般只有一个
+    // 如果这个bin模型有多个打包，则只使用第一个
     if (model_count > 1)
     {
         std::cout << "[WARN] This model file have more than 1 model, only use model 0.";
@@ -262,6 +262,612 @@ int RacingSegmentation::load_bin_model()
 
     std::cout << "[INFO] Load Binary Model Successfully!" << std::endl;
     std::cout << "================================================" << std::endl << std::endl;
+
+    return 0;
+}
+
+int RacingSegmentation::detect(uint8_t* ynv12)
+{
+    // 1. 准备输入张量
+    hbDNNTensor input;
+    input.properties = input_properties;
+    hbSysAllocCachedMem(&input.sysMem[0], int(3 * input_H * input_W / 2));
+
+    memcpy(input.sysMem[0].virAddr, ynv12, int(3 * input_H * input_W / 2));
+    hbSysFlushMem(&input.sysMem[0], HB_SYS_MEM_CACHE_CLEAN);
+
+    // 2. 准备输出张量
+    hbDNNTensor *output = new hbDNNTensor[output_count];
+    for (int i = 0; i < 10; i++)
+    {
+        hbDNNTensorProperties &output_properties = output[i].properties;
+        hbDNNGetOutputTensorProperties(&output_properties, dnn_handle, i);
+        int out_aligned_size = output_properties.alignedByteSize;
+        hbSysMem &mem = output[i].sysMem[0];
+        hbSysAllocCachedMem(&mem, out_aligned_size);
+    }
+
+    // 3. 执行推理
+    hbDNNTaskHandle_t task_handle = nullptr;
+    hbDNNInferCtrlParam infer_ctrl_param;
+    HB_DNN_INITIALIZE_INFER_CTRL_PARAM(&infer_ctrl_param);
+    hbDNNInfer(&task_handle, &output, &input, dnn_handle, &infer_ctrl_param);
+    hbDNNWaitTaskDone(task_handle, 0);
+
+    return 0;
+}
+
+int RacingSegmentation::postprocessing()
+{
+    // YOLO11-Seg-Detect 后处理
+    float CONF_THRES_RAW = -log(1 / score_threshold - 1);               // 利用反函数作用阈值，利用单调性筛选
+    std::vector<std::vector<cv::Rect2d>> bboxes(class_num);             // 每个id的xyhw 信息使用一个std::vector<cv::Rect2d>存储
+    std::vector<std::vector<float>> scores(class_num);                  // 每个id的score信息使用一个std::vector<float>存储
+    std::vector<std::vector<std::vector<float>>> maskes(class_num);     // 每个id的mask信息使用一个std::vector<std::vector>存储
+
+    // 1.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    if (output[order[9]].properties.quantiType != SCALE)
+    {
+        std::cout << "[Error] output[order[9]] QuantiType is not SCALE, please check!" << std::endl;
+        return -1;
+    }
+
+    // 1.2 对缓存的BPU内存进行刷新
+    hbSysFlushMem(&(output[order[9]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+
+    // 1.3 将BPU推理完的内存地址转换为对应类型的指针
+    auto *proto_data = reinterpret_cast<int16_t *>(output[order[9]].sysMem[0].virAddr);
+    float proto_scale_data = output[order[9]].properties.scale.scaleData[0];
+
+    // 1.4 反量化
+    begin_time = std::chrono::system_clock::now();
+    std::vector<float> proto(H_4 * W_4 * mces);
+
+    for (int h = 0; h < H_4; h++)
+    {
+        for (int w = 0; w < W_4; w++)
+        {
+            for (int c = 0; c < mces; c++)
+            {
+                // 索引计算需要修正，根据tensor的存储布局 (h, w, c)
+                int index = (h * W_4 * mces) + (w * mces) + c;
+                proto[index] = static_cast<float>(proto_data[index]) * proto_scale_data;
+            }
+        }
+    }
+
+    // 2. 小目标特征图
+    // output[order[0]]: (1, H // 8,  W // 8,  class_num)
+    // output[order[1]]: (1, H // 8,  W // 8,  4 * reg)
+    // output[order[2]]: (1, H // 8,  W // 8,  mces)
+
+    // 2.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    if (output[order[0]].properties.quantiType != NONE)
+    {
+        std::cout << "[Error] output[order[0]] QuantiType is not NONE, please check!" << std::endl;
+        return -1;
+    }
+    if (output[order[1]].properties.quantiType != SCALE)
+    {
+        std::cout << "[Error] output[order[1]] QuantiType is not SCALE, please check!" << std::endl;
+        return -1;
+    }
+    if (output[order[2]].properties.quantiType != SCALE)
+    {
+        std::cout << "[Error] output[order[2]] QuantiType is not SCALE, please check!" << std::endl;
+        return -1;
+    }
+
+    // 2.2 对缓存的BPU内存进行刷新
+    hbSysFlushMem(&(output[order[0]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+    hbSysFlushMem(&(output[order[1]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+    hbSysFlushMem(&(output[order[2]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+
+    // 2.3 将BPU推理完的内存地址转换为对应类型的指针
+    auto *s_cls_raw = reinterpret_cast<float *>(output[order[0]].sysMem[0].virAddr);
+    auto *s_bbox_raw = reinterpret_cast<int32_t *>(output[order[1]].sysMem[0].virAddr);
+    auto *s_bbox_scale = reinterpret_cast<float *>(output[order[1]].properties.scale.scaleData);
+    auto *s_mces_raw = reinterpret_cast<int32_t *>(output[order[2]].sysMem[0].virAddr);
+    auto *s_mces_scale = reinterpret_cast<float *>(output[order[2]].properties.scale.scaleData);
+    for (int h = 0; h < H_8; h++)
+    {
+        for (int w = 0; w < W_8; w++)
+        {
+            // 2.4 取对应H和W位置的C通道, 记为数组的形式
+            // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
+            // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
+            float *cur_s_cls_raw = s_cls_raw;
+            int32_t *cur_s_bbox_raw = s_bbox_raw;
+            int32_t *cur_s_mces_raw = s_mces_raw;
+
+            // 2.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            int cls_id = 0;
+            for (int i = 1; i < class_num; i++)
+            {
+                if (cur_s_cls_raw[i] > cur_s_cls_raw[cls_id])
+                {
+                    cls_id = i;
+                }
+            }
+
+            // 2.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            if (cur_s_cls_raw[cls_id] < CONF_THRES_RAW)
+            {
+                s_cls_raw += class_num;
+                s_bbox_raw += reg * 4;
+                s_mces_raw += mces;
+                continue;
+            }
+
+            // 2.7 计算这个目标的分数
+            float score = 1 / (1 + std::exp(-cur_s_cls_raw[cls_id]));
+
+            // 2.8 对bbox_raw信息进行反量化, DFL计算
+            float ltrb[4], sum, dfl;
+            for (int i = 0; i < 4; i++)
+            {
+                ltrb[i] = 0.;
+                sum = 0.;
+                for (int j = 0; j < reg; j++)
+                {
+                    int index_id = reg * i + j;
+                    dfl = std::exp(float(cur_s_bbox_raw[index_id]) * s_bbox_scale[index_id]);
+                    ltrb[i] += dfl * j;
+                    sum += dfl;
+                }
+                ltrb[i] /= sum;
+            }
+
+            // 2.9 剔除不合格的框
+            if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
+            {
+                s_cls_raw += class_num;
+                s_bbox_raw += reg * 4;
+                s_mces_raw += mces;
+                continue;
+            }
+
+            // 2.10 dist 2 bbox (ltrb 2 xyxy)
+            float x1 = (w + 0.5 - ltrb[0]) * 8.0;
+            float y1 = (h + 0.5 - ltrb[1]) * 8.0;
+            float x2 = (w + 0.5 + ltrb[2]) * 8.0;
+            float y2 = (h + 0.5 + ltrb[3]) * 8.0;
+
+            // 2.11 对应类别加入到对应的std::vector中
+            bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
+            scores[cls_id].push_back(score);
+
+            // 提取掩码系数并反量化
+            std::vector<float> mask_coeffs(mces);
+            for (int i = 0; i < mces; i++)
+            {
+                mask_coeffs[i] = float(cur_s_mces_raw[i]) * s_mces_scale[i];
+            }
+            maskes[cls_id].push_back(mask_coeffs);
+
+            s_cls_raw += class_num;
+            s_bbox_raw += reg * 4;
+            s_mces_raw += mces;
+        }
+    }
+
+    // 3. 中目标特征图
+    // output[order[3]]: (1, H // 16,  W // 16,  class_num)
+    // output[order[4]]: (1, H // 16,  W // 16,  4 * reg)
+    // output[order[5]]: (1, H // 16,  W // 16,  mces)
+
+    // 3.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    if (output[order[3]].properties.quantiType != NONE)
+    {
+        std::cout << "[Error] output[order[3]] QuantiType is not NONE, please check!" << std::endl;
+        return -1;
+    }
+    if (output[order[4]].properties.quantiType != SCALE)
+    {
+        std::cout << "[Error] output[order[4]] QuantiType is not SCALE, please check!" << std::endl;
+        return -1;
+    }
+    if (output[order[5]].properties.quantiType != SCALE)
+    {
+        std::cout << "[Error] output[order[5]] QuantiType is not SCALE, please check!" << std::endl;
+        return -1;
+    }
+
+    // 3.2 对缓存的BPU内存进行刷新
+    hbSysFlushMem(&(output[order[3]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+    hbSysFlushMem(&(output[order[4]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+    hbSysFlushMem(&(output[order[5]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+
+    // 3.3 将BPU推理完的内存地址转换为对应类型的指针
+    auto *m_cls_raw = reinterpret_cast<float *>(output[order[3]].sysMem[0].virAddr);
+    auto *m_bbox_raw = reinterpret_cast<int32_t *>(output[order[4]].sysMem[0].virAddr);
+    auto *m_bbox_scale = reinterpret_cast<float *>(output[order[4]].properties.scale.scaleData);
+    auto *m_mces_raw = reinterpret_cast<int32_t *>(output[order[5]].sysMem[0].virAddr);
+    auto *m_mces_scale = reinterpret_cast<float *>(output[order[5]].properties.scale.scaleData);
+
+    for (int h = 0; h < H_16; h++)
+    {
+        for (int w = 0; w < W_16; w++)
+        {
+            // 3.4 取对应H和W位置的C通道, 记为数组的形式
+            // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
+            // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
+            float *cur_m_cls_raw = m_cls_raw;
+            int32_t *cur_m_bbox_raw = m_bbox_raw;
+            int32_t *cur_m_mces_raw = m_mces_raw;
+
+            // 3.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            int cls_id = 0;
+            for (int i = 1; i < class_num; i++)
+            {
+                if (cur_m_cls_raw[i] > cur_m_cls_raw[cls_id])
+                {
+                    cls_id = i;
+                }
+            }
+
+            // 3.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            if (cur_m_cls_raw[cls_id] < CONF_THRES_RAW)
+            {
+                m_cls_raw += class_num;
+                m_bbox_raw += reg * 4;
+                m_mces_raw += mces;
+                continue;
+            }
+
+            // 3.7 计算这个目标的分数
+            float score = 1 / (1 + std::exp(-cur_m_cls_raw[cls_id]));
+
+            // 3.8 对bbox_raw信息进行反量化, DFL计算
+            float ltrb[4], sum, dfl;
+            for (int i = 0; i < 4; i++)
+            {
+                ltrb[i] = 0.;
+                sum = 0.;
+                for (int j = 0; j < reg; j++)
+                {
+                    int index_id = reg * i + j;
+                    dfl = std::exp(float(cur_m_bbox_raw[index_id]) * m_bbox_scale[index_id]);
+                    ltrb[i] += dfl * j;
+                    sum += dfl;
+                }
+                ltrb[i] /= sum;
+            }
+
+            // 3.9 剔除不合格的框
+            if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
+            {
+                m_cls_raw += class_num;
+                m_bbox_raw += reg * 4;
+                m_mces_raw += mces;
+                continue;
+            }
+
+            // 3.10 dist 2 bbox (ltrb 2 xyxy)
+            float x1 = (w + 0.5 - ltrb[0]) * 16.0;
+            float y1 = (h + 0.5 - ltrb[1]) * 16.0;
+            float x2 = (w + 0.5 + ltrb[2]) * 16.0;
+            float y2 = (h + 0.5 + ltrb[3]) * 16.0;
+
+            // 3.11 对应类别加入到对应的std::vector中
+            bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
+            scores[cls_id].push_back(score);
+
+            // 提取掩码系数并反量化
+            std::vector<float> mask_coeffs(mces);
+            for (int i = 0; i < mces; i++)
+            {
+                mask_coeffs[i] = float(cur_m_mces_raw[i]) * m_mces_scale[i];
+            }
+            maskes[cls_id].push_back(mask_coeffs);
+
+            m_cls_raw += class_num;
+            m_bbox_raw += reg * 4;
+            m_mces_raw += mces;
+        }
+    }
+
+    // 4. 大目标特征图
+    // output[order[6]]: (1, H // 32,  W // 32,  class_num)
+    // output[order[7]]: (1, H // 32,  W // 32,  4 * reg)
+    // output[order[8]]: (1, H // 32,  W // 16,  mces)
+
+    // 4.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    if (output[order[6]].properties.quantiType != NONE)
+    {
+        std::cout << "[Error] output[order[6]] QuantiType is not NONE, please check!" << std::endl;
+        return -1;
+    }
+    if (output[order[7]].properties.quantiType != SCALE)
+    {
+        std::cout << "[Error] output[order[7]] QuantiType is not SCALE, please check!" << std::endl;
+        return -1;
+    }
+    if (output[order[8]].properties.quantiType != SCALE)
+    {
+        std::cout << "[Error] output[order[8]] QuantiType is not SCALE, please check!" << std::endl;
+        return -1;
+    }
+
+    // 4.2 对缓存的BPU内存进行刷新
+    hbSysFlushMem(&(output[order[6]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+    hbSysFlushMem(&(output[order[7]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+    hbSysFlushMem(&(output[order[8]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+
+    // 4.3 将BPU推理完的内存地址转换为对应类型的指针
+    auto *l_cls_raw = reinterpret_cast<float *>(output[order[6]].sysMem[0].virAddr);
+    auto *l_bbox_raw = reinterpret_cast<int32_t *>(output[order[7]].sysMem[0].virAddr);
+    auto *l_bbox_scale = reinterpret_cast<float *>(output[order[7]].properties.scale.scaleData);
+    auto *l_mces_raw = reinterpret_cast<int32_t *>(output[order[8]].sysMem[0].virAddr);
+    auto *l_mces_scale = reinterpret_cast<float *>(output[order[8]].properties.scale.scaleData);
+
+    for (int h = 0; h < H_32; h++)
+    {
+        for (int w = 0; w < W_32; w++)
+        {
+            // 4.4 取对应H和W位置的C通道, 记为数组的形式
+            // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
+            // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
+            float *cur_l_cls_raw = l_cls_raw;
+            int32_t *cur_l_bbox_raw = l_bbox_raw;
+            int32_t *cur_l_mces_raw = l_mces_raw;
+
+            // 4.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            int cls_id = 0;
+            for (int i = 1; i < class_num; i++)
+            {
+                if (cur_l_cls_raw[i] > cur_l_cls_raw[cls_id])
+                {
+                    cls_id = i;
+                }
+            }
+
+            // 4.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            if (cur_l_cls_raw[cls_id] < CONF_THRES_RAW)
+            {
+                l_cls_raw += class_num;
+                l_bbox_raw += reg * 4;
+                l_mces_raw += mces;
+                continue;
+            }
+
+            // 4.7 计算这个目标的分数
+            float score = 1 / (1 + std::exp(-cur_l_cls_raw[cls_id]));
+
+            // 4.8 对bbox_raw信息进行反量化, DFL计算
+            float ltrb[4], sum, dfl;
+            for (int i = 0; i < 4; i++)
+            {
+                ltrb[i] = 0.;
+                sum = 0.;
+                for (int j = 0; j < reg; j++)
+                {
+                    int index_id = reg * i + j;
+                    dfl = std::exp(float(cur_l_bbox_raw[index_id]) * l_bbox_scale[index_id]);
+                    ltrb[i] += dfl * j;
+                    sum += dfl;
+                }
+                ltrb[i] /= sum;
+            }
+
+            // 4.9 剔除不合格的框
+            if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
+            {
+                l_cls_raw += class_num;
+                l_bbox_raw += reg * 4;
+                l_mces_raw += mces;
+                continue;
+            }
+
+            // 4.10 dist 2 bbox (ltrb 2 xyxy)
+            float x1 = (w + 0.5 - ltrb[0]) * 32.0;
+            float y1 = (h + 0.5 - ltrb[1]) * 32.0;
+            float x2 = (w + 0.5 + ltrb[2]) * 32.0;
+            float y2 = (h + 0.5 + ltrb[3]) * 32.0;
+
+            // 4.11 对应类别加入到对应的std::vector中
+            bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
+            scores[cls_id].push_back(score);
+
+            // 提取掩码系数并反量化
+            std::vector<float> mask_coeffs(mces);
+            for (int i = 0; i < mces; i++)
+            {
+                mask_coeffs[i] = float(cur_l_mces_raw[i]) * l_mces_scale[i];
+            }
+            maskes[cls_id].push_back(mask_coeffs);
+
+            l_cls_raw += class_num;
+            l_bbox_raw += reg * 4;
+            l_mces_raw += mces;
+        }
+    }
+
+    cv::Mat img_display = resize_img.clone(); 
+    // 创建掩膜图像
+    cv::Mat zeros = cv::Mat::zeros(input_H, input_W, CV_8UC3);
+    // 创建最终合成图像（原图+掩膜）
+    cv::Mat result_overlay;
+
+    // 8. 使用OpenCV的NMS进行过滤
+    // 8. Use OpenCV's NMS for filtering
+    std::vector<std::vector<cv::Rect2d>> nms_bboxes(class_num);
+    std::vector<std::vector<float>> nms_scores(class_num);
+    std::vector<std::vector<std::vector<float>>> nms_maskes(class_num);
+
+    for (int cls_id = 0; cls_id < class_num; cls_id++)
+    {
+        if (bboxes[cls_id].size() == 0)
+        {
+            continue;
+        }
+
+        // 创建原始检测结果的索引
+        std::vector<int> indices;
+        cv::dnn::NMSBoxes(bboxes[cls_id], scores[cls_id], score_threshold, nms_threshold, indices);
+
+        for (const auto idx : indices)
+        {
+            nms_bboxes[cls_id].push_back(bboxes[cls_id][idx]);
+            nms_scores[cls_id].push_back(scores[cls_id][idx]);
+            nms_maskes[cls_id].push_back(maskes[cls_id][idx]);
+        }
+    }
+
+    // 现在开始掩膜处理，记录开始时间
+    begin_time = std::chrono::system_clock::now();
+
+    // 9. 进行绘制
+    // 9. Drawing
+    // 使用已有的rdk_colors变量
+    std::vector<cv::Scalar>& colors = rdk_colors;
+
+    // 预分配掩膜矩阵内存
+    std::vector<cv::Mat> all_masks;
+    std::vector<cv::Rect> all_rois;
+    std::vector<int> all_cls_ids;
+
+    // 首先收集所有需要处理的掩膜和矩形框
+    for (int cls_id = 0; cls_id < class_num; cls_id++)
+    {
+        for (int i = 0; i < nms_bboxes[cls_id].size(); i++)
+        {
+            // 绘制边界框
+            // Draw bounding box
+            cv::rectangle(img_display, nms_bboxes[cls_id][i], cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]), 2);
+            cv::putText(img_display, object_names[cls_id] + ": " + std::to_string(nms_scores[cls_id][i]).substr(0, 5), cv::Point(nms_bboxes[cls_id][i].x, nms_bboxes[cls_id][i].y - 2), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]), 2);
+
+            // 应用掩码
+            // Apply mask
+            float x1 = std::max(0.0, nms_bboxes[cls_id][i].x);
+            float y1 = std::max(0.0, nms_bboxes[cls_id][i].y);
+            float x2 = std::min(static_cast<double>(input_W), nms_bboxes[cls_id][i].x + nms_bboxes[cls_id][i].width);
+            float y2 = std::min(static_cast<double>(input_H), nms_bboxes[cls_id][i].y + nms_bboxes[cls_id][i].height);
+
+            int mask_h = static_cast<int>(y2 - y1);
+            int mask_w = static_cast<int>(x2 - x1);
+
+            if (mask_h <= 0 || mask_w <= 0)
+                continue;
+
+            // 确保ROI不超出图像边界
+            if (x1 + mask_w > input_W || y1 + mask_h > input_H)
+                continue;
+
+            // 将需要处理的信息保存起来
+            all_cls_ids.push_back(cls_id);
+            all_rois.push_back(cv::Rect(static_cast<int>(x1), static_cast<int>(y1), mask_w, mask_h));
+            
+            // 获取掩码系数
+            std::vector<float>& mask_coeffs = nms_maskes[cls_id][i];
+            
+            // 创建掩码矩阵
+            cv::Mat mask = cv::Mat::zeros(mask_h, mask_w, CV_32F);
+            
+            // 局部缓存proto数组索引，减少重复计算
+            std::vector<int> proto_indices(mask_h * mask_w * mces, -1);
+            
+            // 预计算每个位置对应的原型矩阵索引
+            for (int h = 0; h < mask_h; h++) {
+                for (int w = 0; w < mask_w; w++) {
+                    // 确定原型矩阵中的位置
+                    int mask_y = static_cast<int>((h + y1) / 4);
+                    int mask_x = static_cast<int>((w + x1) / 4);
+                    
+                    if (mask_y < H_4 && mask_x < W_4) {
+                        for (int c = 0; c < mces; c++) {
+                            int idx = h * mask_w * mces + w * mces + c;
+                            proto_indices[idx] = (mask_y * W_4 * mces) + (mask_x * mces) + c;
+                        }
+                    }
+                }
+            }
+
+            // 使用OpenMP并行处理掩码计算
+            #pragma omp parallel for collapse(2)
+            for (int h = 0; h < mask_h; h++) {
+                for (int w = 0; w < mask_w; w++) {
+                    float val = 0.0f;
+                    
+                    // 使用预计算的索引获取proto数据
+                    for (int c = 0; c < mces; c++) {
+                        int idx = h * mask_w * mces + w * mces + c;
+                        int proto_idx = proto_indices[idx];
+                        
+                        if (proto_idx >= 0) {
+                            val += mask_coeffs[c] * proto[proto_idx];
+                        }
+                    }
+                    
+                    // 应用Sigmoid激活函数
+                    mask.at<float>(h, w) = 1.0f / (1.0f + std::exp(-val));
+                }
+            }
+            
+            // 应用阈值获取二值掩码
+            cv::Mat binary_mask;
+            cv::threshold(mask, binary_mask, 0.5, 1.0, cv::THRESH_BINARY);
+            binary_mask.convertTo(binary_mask, CV_8U, 255);
+            
+            // 应用高斯模糊平滑边缘 (减小模糊核大小以提高性能)
+            cv::GaussianBlur(binary_mask, binary_mask, cv::Size(5, 5), 0);
+            
+            // 保存处理好的掩膜
+            all_masks.push_back(binary_mask);
+        }
+    }
+    
+    // 单独一步应用所有掩膜，避免频繁地修改zeros图像
+    #pragma omp parallel for
+    for (int i = 0; i < all_masks.size(); i++) {
+        int cls_id = all_cls_ids[i];
+        cv::Rect roi = all_rois[i];
+        cv::Mat binary_mask = all_masks[i];
+        
+        // 创建彩色掩码
+        cv::Mat color_mask = cv::Mat::zeros(roi.height, roi.width, CV_8UC3);
+        color_mask.setTo(cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]));
+        
+        // 将掩码应用于颜色
+        cv::Mat color_instance_mask;
+        cv::bitwise_and(color_mask, color_mask, color_instance_mask, binary_mask);
+        
+        // 确保ROI有效
+        if (roi.x >= 0 && roi.y >= 0 && roi.x + roi.width <= input_W && roi.y + roi.height <= input_H) {
+            // 将掩码复制到零图像上的正确位置
+            cv::Mat zeros_roi = zeros(roi);
+            #pragma omp critical
+            {
+                cv::addWeighted(zeros_roi, 1.0, color_instance_mask, 0.7, 0, zeros_roi);
+            }
+        }
+    }
+    
+    // 将掩码覆盖到检测图上创建最终结果图
+    cv::Mat final_result;
+    cv::addWeighted(img_display, 0.7, zeros, 0.3, 0, final_result);
+
+    // 创建三图并排的结果图：检测图、掩膜图、最终结果图
+    cv::Mat concatenated_result;
+    cv::hconcat(img_display, zeros, concatenated_result);  // 先拼接检测图和掩膜图
+    cv::hconcat(concatenated_result, final_result, concatenated_result);  // 再拼接最终结果图
+
+    // 10. 释放任务
+    // 10. Release task
+    hbDNNReleaseTask(task_handle);
+
+    // 11. 释放内存
+    // 11. Release memory
+    hbSysFreeMem(&(input.sysMem[0]));
+    for (int i = 0; i < 6; i++)
+        hbSysFreeMem(&(output[i].sysMem[0]));
+
+    return 0;
+}
+
+int RacingSegmentation::release_model()
+{
+    hbDNNRelease(packed_dnn_handle);
 
     return 0;
 }

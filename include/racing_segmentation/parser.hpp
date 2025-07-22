@@ -27,6 +27,9 @@ class RacingSegmentation
 public:
     int load_config();
     int load_bin_model();
+    int detect(uint8_t* ynv12);
+    int postprocessing();
+    int release_model();
 
 private:
     std::string model_file;
