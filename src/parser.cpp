@@ -41,6 +41,8 @@ int RacingSegmentation::load_config()
         nms_top_k = config.at("nms_top_k");
         reg = config.at("reg");
         mces = config.at("mces");
+        model_input_w = config.at("model_input_w");
+        model_input_h = config.at("model_input_h");
 
     } catch (nlohmann::json::exception& e) {
         std::cerr << "[ERROR] JSON parse error: " << e.what() << std::endl;
@@ -71,6 +73,8 @@ int RacingSegmentation::load_config()
     std::cout << "[INFO] NMS Top K: " << nms_top_k << std::endl;
     std::cout << "[INFO] Regression: " << reg << std::endl;
     std::cout << "[INFO] Mask Coefficients: " << mces << std::endl;
+    std::cout << "[INFO] Model Input Width: " << model_input_w << std::endl;
+    std::cout << "[INFO] Model Input Height: " << model_input_h << std::endl;
     std::cout << "[INFO] Load Configuration Successfully!" << std::endl;
     std::cout << "================================================" << std::endl << std::endl;
 
@@ -266,7 +270,7 @@ int RacingSegmentation::load_bin_model()
     return 0;
 }
 
-int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& results)
+int RacingSegmentation::detect(uint8_t* ynv12, int original_w, int original_h, std::vector<DetectionResult>& results)
 {
     results.clear();
 
@@ -690,34 +694,46 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
 
     for (int cls_id = 0; cls_id < class_num; cls_id++)
     {
-        if (bboxes[cls_id].size() == 0)
-        {
-            continue;
-        }
-
-        // 创建原始检测结果的索引
+        if (bboxes[cls_id].empty()) continue;
         std::vector<int> indices;
-        cv::dnn::NMSBoxes(bboxes[cls_id], scores[cls_id], score_threshold, nms_threshold, indices);
-
-        for (const auto idx : indices)
-        {
+        cv::dnn::NMSBoxes(bboxes[cls_id], scores[cls_id], score_threshold, nms_threshold, indices, 1.0f, nms_top_k);
+        for (const auto idx : indices) {
             nms_bboxes[cls_id].push_back(bboxes[cls_id][idx]);
             nms_scores[cls_id].push_back(scores[cls_id][idx]);
             nms_maskes[cls_id].push_back(maskes[cls_id][idx]);
         }
     }
 
+    // 9. 将NMS后的坐标转换为原始图像上的坐标
+    // 9.1 计算缩放比例和填充量
+    // input_W 和 input_H 是模型输入尺寸
+    double scale = std::min(static_cast<double>(input_W) / original_w, static_cast<double>(input_H) / original_h);
+    int scaled_w = static_cast<int>(original_w * scale);
+    int scaled_h = static_cast<int>(original_h * scale);
+    int pad_x = (input_W - scaled_w) / 2; // 左边填充
+    int pad_y = (input_H - scaled_h) / 2; // 上边填充
+
     for (int cls_id = 0; cls_id < class_num; cls_id++)
     {
         for (size_t i = 0; i < nms_bboxes[cls_id].size(); i++)
         {
-            // 裁剪 box 到图像边界内
-            float x1 = std::max(0.0, nms_bboxes[cls_id][i].x);
-            float y1 = std::max(0.0, nms_bboxes[cls_id][i].y);
-            float x2 = std::min(static_cast<double>(input_W), x1 + nms_bboxes[cls_id][i].width);
-            float y2 = std::min(static_cast<double>(input_H), y1 + nms_bboxes[cls_id][i].height);
-            int mask_w = static_cast<int>(x2 - x1);
-            int mask_h = static_cast<int>(y2 - y1);
+            // 9.2 将 NMS 后的模型坐标框进行逆变换
+            const cv::Rect2d& box_on_model = nms_bboxes[cls_id][i];
+            
+            float original_box_x = (box_on_model.x - pad_x) / scale;
+            float original_box_y = (box_on_model.y - pad_y) / scale;
+            float original_box_width = box_on_model.width / scale;
+            float original_box_height = box_on_model.height / scale;
+
+            cv::Rect2f final_box(original_box_x, original_box_y, original_box_width, original_box_height);
+            
+            // 裁剪 box 到原始图像边界内
+            float x1_model = std::max(0.0, box_on_model.x);
+            float y1_model = std::max(0.0, box_on_model.y);
+            float x2_model = std::min(static_cast<double>(input_W), x1_model + box_on_model.width);
+            float y2_model = std::min(static_cast<double>(input_H), y1_model + box_on_model.height);
+            int mask_w = static_cast<int>(x2_model - x1_model);
+            int mask_h = static_cast<int>(y2_model - y1_model);
 
             if (mask_h <= 0 || mask_w <= 0) continue;
 
@@ -729,14 +745,14 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
             for (int r = 0; r < mask_h; ++r) {
                 for (int c = 0; c < mask_w; ++c) {
                     float sum = 0.0f;
-                    int proto_y = static_cast<int>((r + y1) / 4);
-                    int proto_x = static_cast<int>((c + x1) / 4);
+                    int proto_y = static_cast<int>((r + y1_model) / 4);
+                    int proto_x = static_cast<int>((c + x1_model) / 4);
                     if (proto_y < H_4 && proto_x < W_4) {
                         for (int k = 0; k < mces; ++k) {
                            sum += mask_coeffs[k] * proto[(proto_y * W_4 + proto_x) * mces + k];
                         }
                     }
-                    mask_mat.at<float>(r, c) = 1.0f / (1.0f + std::exp(-sum)); // Sigmoid
+                    mask_mat.at<float>(r, c) = 1.0f / (1.0f + std::exp(-sum));
                 }
             }
             
@@ -744,13 +760,13 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
             cv::threshold(mask_mat, binary_mask, 0.5, 255, cv::THRESH_BINARY);
             binary_mask.convertTo(binary_mask, CV_8U);
 
-            // 填充结果结构体
+            // 9.3 填充结果结构体，直接使用转换后的坐标
             DetectionResult res;
             res.class_id = cls_id;
             res.class_name = cls_names_list[cls_id];
             res.score = nms_scores[cls_id][i];
-            res.box = nms_bboxes[cls_id][i];
-            res.mask = binary_mask; // 保存二值化掩码
+            res.box = final_box;
+            res.mask = binary_mask;
             
             results.push_back(res);
         }
