@@ -13,8 +13,8 @@ int RacingSegmentation::rdk_check_success(int value, const std::string &errmsg)
 int RacingSegmentation::load_config()
 {
     std::cout << "================================================" << std::endl;
-    std::cout << "[INFO] Loading Configuration From config/yolo11-seg.json" << std::endl;
-    std::ifstream config_file("config/yolo11-seg.json");
+    std::cout << "[INFO] Loading Configuration From config/yolo11_seg.json" << std::endl;
+    std::ifstream config_file("config/yolo11_seg.json");
     if (!config_file.is_open())
     {
         std::cerr << "[ERROR] Failed to open config file." << std::endl;
@@ -83,7 +83,7 @@ int RacingSegmentation::load_bin_model()
     // 1. 加载bin模型
     auto begin_time = std::chrono::system_clock::now();
     hbPackedDNNHandle_t packed_dnn_handle;
-    const char *model_file_name = MODEL_PATH;
+    const char *model_file_name = model_file.c_str();
     rdk_check_success(
         hbDNNInitializeFromFiles(&packed_dnn_handle, &model_file_name, 1),
         "hbDNNInitializeFromFiles failed");
@@ -245,8 +245,8 @@ int RacingSegmentation::load_bin_model()
     // 7. 打印并检查调整后的输出头顺序的映射
     if (order[0] + order[1] + order[2] + order[3] + order[4] + order[5] + order[6] + order[7] + order[8] + order[9] == 0 + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9)
     {
-        std::cout << "[INFO] Outputs order check SUCCESS, continue." << std::endl;
-        std::cout << "Order = {";
+        std::cout << "[INFO] Outputs Order Check SUCCESS" << std::endl;
+        std::cout << "[INFO] Order = {";
         for (int i = 0; i < 10; i++)
         {
             std::cout << order[i] << ", ";
@@ -255,10 +255,13 @@ int RacingSegmentation::load_bin_model()
     }
     else
     {
-        std::cout << "[INFO] Outputs order check FAILED, use default" << std::endl;
+        std::cout << "[INFO] Outputs Order Check FAILED, use default" << std::endl;
         for (int i = 0; i < 10; i++)
             order[i] = i;
     }
+
+    std::cout << "[INFO] Load Binary Model Successfully!" << std::endl;
+    std::cout << "================================================" << std::endl << std::endl;
 
     return 0;
 }
