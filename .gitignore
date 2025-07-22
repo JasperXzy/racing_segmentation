@@ -9,5 +9,9 @@
 *.avi
 *.mkv
 
-* model train
+# model train
 runs/
+
+*.pt
+*.bin
+*.onnx
