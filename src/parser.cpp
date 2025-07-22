@@ -1,5 +1,12 @@
 #include "racing_segmentation/parser.hpp"
 
+RacingSegmentation::~RacingSegmentation()
+{
+    if (packed_dnn_handle) {
+        release_model();
+    }
+}
+
 int RacingSegmentation::rdk_check_success(int value, const std::string &errmsg)
 {
     if (value != 0)
@@ -22,22 +29,23 @@ int RacingSegmentation::load_config()
     }
  
     nlohmann::json config;
-    config_file >> config;
- 
-    model_file = config["model_file"];
-    class_num = config["class_num"];
-    dnn_parser = config["dnn_Parser"];
-    cls_names_list = config["cls_names_list"].get<std::vector<std::string>>();
-    preprocess_type = config["preprocess_type"];
-    score_threshold = config["score_threshold"];
-    nms_threshold = config["nms_threshold"];
-    nms_top_k = config["nms_top_k"];
-    reg = config["reg"];
-    mces = config["mces"];
-    is_point = config["is_point"];
-    font_size = config["font_size"];
-    font_thickness = config["font_thickness"];
-    line_size = config["line_size"];
+    try {
+        config_file >> config;
+        model_file = config.at("model_file");
+        class_num = config.at("class_num");
+        dnn_parser = config.at("dnn_Parser");
+        cls_names_list = config.at("cls_names_list").get<std::vector<std::string>>();
+        preprocess_type = config.at("preprocess_type");
+        score_threshold = config.at("score_threshold");
+        nms_threshold = config.at("nms_threshold");
+        nms_top_k = config.at("nms_top_k");
+        reg = config.at("reg");
+        mces = config.at("mces");
+
+    } catch (nlohmann::json::exception& e) {
+        std::cerr << "[ERROR] JSON parse error: " << e.what() << std::endl;
+        return -1;
+    }
 
     config_file.close();
     
@@ -63,10 +71,6 @@ int RacingSegmentation::load_config()
     std::cout << "[INFO] NMS Top K: " << nms_top_k << std::endl;
     std::cout << "[INFO] Regression: " << reg << std::endl;
     std::cout << "[INFO] Mask Coefficients: " << mces << std::endl;
-    std::cout << "[INFO] Is Point: " << (is_point ? "True" : "False") << std::endl;
-    std::cout << "[INFO] Font Size: " << font_size << std::endl;
-    std::cout << "[INFO] Font Thickness: " << font_thickness << std::endl;
-    std::cout << "[INFO] Line Size: " << line_size << std::endl;
     std::cout << "[INFO] Load Configuration Successfully!" << std::endl;
     std::cout << "================================================" << std::endl << std::endl;
 
@@ -197,6 +201,15 @@ int RacingSegmentation::load_bin_model()
     }
 
     // 6. 调整输出头顺序的映射
+    int32_t H_4 = input_H / 4;
+    int32_t H_8 = input_H / 8;
+    int32_t H_16 = input_H / 16;
+    int32_t H_32 = input_H / 32;
+    int32_t W_4 = input_W / 4;
+    int32_t W_8 = input_W / 8;
+    int32_t W_16 = input_W / 16;
+    int32_t W_32 = input_W / 32;
+
     int32_t order_we_want[10][3] = {
         {H_8, W_8, class_num},      // output[order[0]]: (1, H // 8,  W // 8,  class_num)
         {H_8, W_8, 4 * reg},        // output[order[1]]: (1, H // 8,  W // 8,  64)
@@ -209,6 +222,7 @@ int RacingSegmentation::load_bin_model()
         {H_32, W_32, mces},         // output[order[8]]: (1, H // 32, W // 32, mces)
         {H_4, W_4, mces}            // output[order[9]]: (1, H // 4, W // 4, mces)
     };
+
     for (int i = 0; i < 10; i++)
     {
         for (int j = 0; j < 10; j++)
@@ -252,13 +266,14 @@ int RacingSegmentation::load_bin_model()
     return 0;
 }
 
-int RacingSegmentation::detect(uint8_t* ynv12)
+int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& results)
 {
-    // 1. 准备输入张量
+    results.clear();
+
+    // 1. 准备输入输出和推理
     hbDNNTensor input;
     input.properties = input_properties;
     hbSysAllocCachedMem(&input.sysMem[0], int(3 * input_H * input_W / 2));
-
     memcpy(input.sysMem[0].virAddr, ynv12, int(3 * input_H * input_W / 2));
     hbSysFlushMem(&input.sysMem[0], HB_SYS_MEM_CACHE_CLEAN);
 
@@ -272,7 +287,7 @@ int RacingSegmentation::detect(uint8_t* ynv12)
         hbSysMem &mem = output[i].sysMem[0];
         hbSysAllocCachedMem(&mem, out_aligned_size);
     }
-
+    
     // 3. 执行推理
     hbDNNTaskHandle_t task_handle = nullptr;
     hbDNNInferCtrlParam infer_ctrl_param;
@@ -281,10 +296,16 @@ int RacingSegmentation::detect(uint8_t* ynv12)
     hbDNNWaitTaskDone(task_handle, 0);
 
     // 后处理
-    float CONF_THRES_RAW = -log(1 / score_threshold - 1);               // 利用反函数作用阈值，利用单调性筛选
-    std::vector<std::vector<cv::Rect2d>> bboxes(class_num);             // 每个id的xyhw 信息使用一个std::vector<cv::Rect2d>存储
-    std::vector<std::vector<float>> scores(class_num);                  // 每个id的score信息使用一个std::vector<float>存储
-    std::vector<std::vector<std::vector<float>>> maskes(class_num);     // 每个id的mask信息使用一个std::vector<std::vector>存储
+    // 在函数内部计算维度
+    const int32_t H_4 = input_H / 4, W_4 = input_W / 4;
+    const int32_t H_8 = input_H / 8, W_8 = input_W / 8;
+    const int32_t H_16 = input_H / 16, W_16 = input_W / 16;
+    const int32_t H_32 = input_H / 32, W_32 = input_W / 32;
+
+    float CONF_THRES_RAW = -log(1 / score_threshold - 1);
+    std::vector<std::vector<cv::Rect2d>> bboxes(class_num);
+    std::vector<std::vector<float>> scores(class_num);
+    std::vector<std::vector<std::vector<float>>> maskes(class_num);
 
     // 4.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[9]].properties.quantiType != SCALE)
@@ -292,14 +313,12 @@ int RacingSegmentation::detect(uint8_t* ynv12)
         std::cout << "[Error] output[order[9]] QuantiType is not SCALE, please check!" << std::endl;
         return -1;
     }
-
     // 4.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[9]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
     // 4.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *proto_data = reinterpret_cast<int16_t *>(output[order[9]].sysMem[0].virAddr);
     float proto_scale_data = output[order[9]].properties.scale.scaleData[0];
-
     // 4.4 反量化
     std::vector<float> proto(H_4 * W_4 * mces);
 
@@ -315,7 +334,7 @@ int RacingSegmentation::detect(uint8_t* ynv12)
             }
         }
     }
-
+    
     // 5. 小目标特征图
     // output[order[0]]: (1, H // 8,  W // 8,  class_num)
     // output[order[1]]: (1, H // 8,  W // 8,  4 * reg)
@@ -663,12 +682,6 @@ int RacingSegmentation::detect(uint8_t* ynv12)
         }
     }
 
-    cv::Mat img_display = resize_img.clone(); 
-    // 创建掩膜图像
-    cv::Mat zeros = cv::Mat::zeros(input_H, input_W, CV_8UC3);
-    // 创建最终合成图像（原图+掩膜）
-    cv::Mat result_overlay;
-
     // 8. 使用OpenCV的NMS进行过滤
     // 8. Use OpenCV's NMS for filtering
     std::vector<std::vector<cv::Rect2d>> nms_bboxes(class_num);
@@ -694,157 +707,76 @@ int RacingSegmentation::detect(uint8_t* ynv12)
         }
     }
 
-    // 9. 进行绘制
-    // 9. Drawing
-    // 使用已有的rdk_colors变量
-    std::vector<cv::Scalar>& colors = rdk_colors;
-
-    // 预分配掩膜矩阵内存
-    std::vector<cv::Mat> all_masks;
-    std::vector<cv::Rect> all_rois;
-    std::vector<int> all_cls_ids;
-
-    // 首先收集所有需要处理的掩膜和矩形框
     for (int cls_id = 0; cls_id < class_num; cls_id++)
     {
-        for (int i = 0; i < nms_bboxes[cls_id].size(); i++)
+        for (size_t i = 0; i < nms_bboxes[cls_id].size(); i++)
         {
-            // 绘制边界框
-            // Draw bounding box
-            cv::rectangle(img_display, nms_bboxes[cls_id][i], cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]), 2);
-            cv::putText(img_display, cls_names_list[cls_id] + ": " + std::to_string(nms_scores[cls_id][i]).substr(0, 5), cv::Point(nms_bboxes[cls_id][i].x, nms_bboxes[cls_id][i].y - 2), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]), 2);
-
-            // 应用掩码
-            // Apply mask
+            // 裁剪 box 到图像边界内
             float x1 = std::max(0.0, nms_bboxes[cls_id][i].x);
             float y1 = std::max(0.0, nms_bboxes[cls_id][i].y);
-            float x2 = std::min(static_cast<double>(input_W), nms_bboxes[cls_id][i].x + nms_bboxes[cls_id][i].width);
-            float y2 = std::min(static_cast<double>(input_H), nms_bboxes[cls_id][i].y + nms_bboxes[cls_id][i].height);
-
-            int mask_h = static_cast<int>(y2 - y1);
+            float x2 = std::min(static_cast<double>(input_W), x1 + nms_bboxes[cls_id][i].width);
+            float y2 = std::min(static_cast<double>(input_H), y1 + nms_bboxes[cls_id][i].height);
             int mask_w = static_cast<int>(x2 - x1);
+            int mask_h = static_cast<int>(y2 - y1);
 
-            if (mask_h <= 0 || mask_w <= 0)
-                continue;
+            if (mask_h <= 0 || mask_w <= 0) continue;
 
-            // 确保ROI不超出图像边界
-            if (x1 + mask_w > input_W || y1 + mask_h > input_H)
-                continue;
-
-            // 将需要处理的信息保存起来
-            all_cls_ids.push_back(cls_id);
-            all_rois.push_back(cv::Rect(static_cast<int>(x1), static_cast<int>(y1), mask_w, mask_h));
-            
-            // 获取掩码系数
+            // 计算掩码
             std::vector<float>& mask_coeffs = nms_maskes[cls_id][i];
-            
-            // 创建掩码矩阵
-            cv::Mat mask = cv::Mat::zeros(mask_h, mask_w, CV_32F);
-            
-            // 局部缓存proto数组索引，减少重复计算
-            std::vector<int> proto_indices(mask_h * mask_w * mces, -1);
-            
-            // 预计算每个位置对应的原型矩阵索引
-            for (int h = 0; h < mask_h; h++) {
-                for (int w = 0; w < mask_w; w++) {
-                    // 确定原型矩阵中的位置
-                    int mask_y = static_cast<int>((h + y1) / 4);
-                    int mask_x = static_cast<int>((w + x1) / 4);
-                    
-                    if (mask_y < H_4 && mask_x < W_4) {
-                        for (int c = 0; c < mces; c++) {
-                            int idx = h * mask_w * mces + w * mces + c;
-                            proto_indices[idx] = (mask_y * W_4 * mces) + (mask_x * mces) + c;
-                        }
-                    }
-                }
-            }
+            cv::Mat mask_mat(mask_h, mask_w, CV_32F);
 
-            // 使用OpenMP并行处理掩码计算
-            #pragma omp parallel for collapse(2)
-            for (int h = 0; h < mask_h; h++) {
-                for (int w = 0; w < mask_w; w++) {
-                    float val = 0.0f;
-                    
-                    // 使用预计算的索引获取proto数据
-                    for (int c = 0; c < mces; c++) {
-                        int idx = h * mask_w * mces + w * mces + c;
-                        int proto_idx = proto_indices[idx];
-                        
-                        if (proto_idx >= 0) {
-                            val += mask_coeffs[c] * proto[proto_idx];
+            #pragma omp parallel for
+            for (int r = 0; r < mask_h; ++r) {
+                for (int c = 0; c < mask_w; ++c) {
+                    float sum = 0.0f;
+                    int proto_y = static_cast<int>((r + y1) / 4);
+                    int proto_x = static_cast<int>((c + x1) / 4);
+                    if (proto_y < H_4 && proto_x < W_4) {
+                        for (int k = 0; k < mces; ++k) {
+                           sum += mask_coeffs[k] * proto[(proto_y * W_4 + proto_x) * mces + k];
                         }
                     }
-                    
-                    // 应用Sigmoid激活函数
-                    mask.at<float>(h, w) = 1.0f / (1.0f + std::exp(-val));
+                    mask_mat.at<float>(r, c) = 1.0f / (1.0f + std::exp(-sum)); // Sigmoid
                 }
             }
             
-            // 应用阈值获取二值掩码
             cv::Mat binary_mask;
-            cv::threshold(mask, binary_mask, 0.5, 1.0, cv::THRESH_BINARY);
-            binary_mask.convertTo(binary_mask, CV_8U, 255);
+            cv::threshold(mask_mat, binary_mask, 0.5, 255, cv::THRESH_BINARY);
+            binary_mask.convertTo(binary_mask, CV_8U);
+
+            // 填充结果结构体
+            DetectionResult res;
+            res.class_id = cls_id;
+            res.class_name = cls_names_list[cls_id];
+            res.score = nms_scores[cls_id][i];
+            res.box = nms_bboxes[cls_id][i];
+            res.mask = binary_mask; // 保存二值化掩码
             
-            // 应用高斯模糊平滑边缘 (减小模糊核大小以提高性能)
-            cv::GaussianBlur(binary_mask, binary_mask, cv::Size(5, 5), 0);
-            
-            // 保存处理好的掩膜
-            all_masks.push_back(binary_mask);
+            results.push_back(res);
         }
     }
-    
-    // 单独一步应用所有掩膜，避免频繁地修改zeros图像
-    #pragma omp parallel for
-    for (int i = 0; i < all_masks.size(); i++) {
-        int cls_id = all_cls_ids[i];
-        cv::Rect roi = all_rois[i];
-        cv::Mat binary_mask = all_masks[i];
-        
-        // 创建彩色掩码
-        cv::Mat color_mask = cv::Mat::zeros(roi.height, roi.width, CV_8UC3);
-        color_mask.setTo(cv::Scalar(colors[cls_id % colors.size()][0], colors[cls_id % colors.size()][1], colors[cls_id % colors.size()][2]));
-        
-        // 将掩码应用于颜色
-        cv::Mat color_instance_mask;
-        cv::bitwise_and(color_mask, color_mask, color_instance_mask, binary_mask);
-        
-        // 确保ROI有效
-        if (roi.x >= 0 && roi.y >= 0 && roi.x + roi.width <= input_W && roi.y + roi.height <= input_H) {
-            // 将掩码复制到零图像上的正确位置
-            cv::Mat zeros_roi = zeros(roi);
-            #pragma omp critical
-            {
-                cv::addWeighted(zeros_roi, 1.0, color_instance_mask, 0.7, 0, zeros_roi);
-            }
-        }
-    }
-    
-    // 将掩码覆盖到检测图上创建最终结果图
-    cv::Mat final_result;
-    cv::addWeighted(img_display, 0.7, zeros, 0.3, 0, final_result);
 
-    // 创建三图并排的结果图：检测图、掩膜图、最终结果图
-    cv::Mat concatenated_result;
-    cv::hconcat(img_display, zeros, concatenated_result);  // 先拼接检测图和掩膜图
-    cv::hconcat(concatenated_result, final_result, concatenated_result);  // 再拼接最终结果图
-
-    // 10. 释放任务
-    // 10. Release task
+    // 释放资源
     hbDNNReleaseTask(task_handle);
-
-    // 11. 释放内存
-    // 11. Release memory
     hbSysFreeMem(&(input.sysMem[0]));
-    for (int i = 0; i < 6; i++)
+
+    // 释放所有 output_count 个内存
+    for (int i = 0; i < output_count; i++) {
         hbSysFreeMem(&(output[i].sysMem[0]));
+    }
+    delete[] output;
 
     return 0;
 }
 
 int RacingSegmentation::release_model()
 {
-    hbDNNRelease(packed_dnn_handle);
-
+    std::cout << "[INFO] Releasing model..." << std::endl;
+    if (packed_dnn_handle) {
+         hbDNNRelease(packed_dnn_handle);
+         packed_dnn_handle = nullptr;
+         dnn_handle = nullptr;
+    }
+    std::cout << "[INFO] Model released." << std::endl;
     return 0;
 }
