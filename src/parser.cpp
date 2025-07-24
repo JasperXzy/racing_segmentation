@@ -294,6 +294,8 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
 
     // 后处理
     profiler.start("3_Postprocess_All");
+
+    profiler.start("3.1_Post_Proto_Dequant");
     // 在函数内部计算维度
     const int32_t H_4 = input_H / 4, W_4 = input_W / 4;
     const int32_t H_8 = input_H / 8, W_8 = input_W / 8;
@@ -306,30 +308,29 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     std::vector<std::vector<std::vector<float>>> maskes(class_num);
 
     // 3.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
-    profiler.start("3.1_Post_Proto_Dequant");
+
     if (output[order[9]].properties.quantiType != SCALE)
     {
         std::cout << "[Error] output[order[9]] QuantiType is not SCALE, please check!" << std::endl;
         return -1;
     }
+
     // 3.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[9]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
     // 3.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *proto_data = reinterpret_cast<int16_t *>(output[order[9]].sysMem[0].virAddr);
     float proto_scale_data = output[order[9]].properties.scale.scaleData[0];
+    
     // 3.4 反量化
     std::vector<float> proto(H_4 * W_4 * mces);
 
-    for (int h = 0; h < H_4; h++)
-    {
-        for (int w = 0; w < W_4; w++)
-        {
-            for (int c = 0; c < mces; c++)
-            {
-                // 索引计算需要修正，根据tensor的存储布局 (h, w, c)
-                int index = (h * W_4 * mces) + (w * mces) + c;
-                proto[index] = static_cast<float>(proto_data[index]) * proto_scale_data;
+    #pragma omp parallel for
+    for (int h = 0; h < H_4; h++) {
+        for (int w = 0; w < W_4; w++) {
+            for (int c = 0; c < mces; c++) {
+                 int index = (h * W_4 + w) * mces + c;
+                 proto[index] = static_cast<float>(proto_data[index]) * proto_scale_data;
             }
         }
     }
