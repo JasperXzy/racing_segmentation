@@ -271,7 +271,7 @@ int RacingSegmentation::load_bin_model()
     return 0;
 }
 
-int RacingSegmentation::detect(uint8_t* ynv12, int original_w, int original_h, std::vector<DetectionResult>& results)
+int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& results, int pad_x, int pad_y, float scale)
 {
     results.clear();
 
@@ -693,12 +693,6 @@ int RacingSegmentation::detect(uint8_t* ynv12, int original_w, int original_h, s
     // 8. 将NMS后的坐标转换为原始图像上的坐标
     // 8.1 计算缩放比例和填充量
     // input_W 和 input_H 是模型输入尺寸
-    double scale = std::min(static_cast<double>(input_W) / original_w, static_cast<double>(input_H) / original_h);
-    int scaled_w = static_cast<int>(original_w * scale);
-    int scaled_h = static_cast<int>(original_h * scale);
-    int pad_x = (input_W - scaled_w) / 2; // 左边填充
-    int pad_y = (input_H - scaled_h) / 2; // 上边填充
-
     for (int cls_id = 0; cls_id < class_num; cls_id++)
     {
         for (size_t i = 0; i < nms_bboxes[cls_id].size(); i++)

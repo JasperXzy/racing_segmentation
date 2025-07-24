@@ -36,7 +36,7 @@ public:
     
     int load_config();
     int load_bin_model();
-    int detect(uint8_t* ynv12, int original_w, int original_h, std::vector<DetectionResult>& results);
+    int detect(uint8_t* ynv12, std::vector<DetectionResult>& results, int pad_x, int pad_y, float scale);
     void convert_to_ros_msg(const std::vector<DetectionResult>& results, ai_msgs::msg::PerceptionTargets& msg) const;
     int release_model();
     int init_inference_buffers();

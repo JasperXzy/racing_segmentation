@@ -43,15 +43,11 @@ private:
         std::vector<uint8_t> output_nv12(dst_w * dst_h * 3 / 2);
  
         int x_shift, y_shift;
-        float x_scale, y_scale;
-        letterbox_nv12(
-            msg->data.data(), src_w, src_h, 
-            output_nv12.data(), dst_w, dst_h,
-            x_shift, y_shift, x_scale, y_scale
-        );
+        float scale;
+        letterbox_nv12(msg->data.data(), src_w, src_h, output_nv12.data(), dst_w, dst_h, x_shift, y_shift, scale, scale);
 
         std::vector<DetectionResult> detection_results;
-        detector_.detect(output_nv12.data(), src_w, src_h, detection_results);
+        detector_.detect(output_nv12.data(), detection_results, x_shift, y_shift, scale);
  
         publish_results(detection_results);
 
