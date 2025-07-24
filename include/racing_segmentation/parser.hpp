@@ -20,7 +20,6 @@
 #include "sensor_msgs/msg/region_of_interest.hpp"
 #include "racing_segmentation/profiler.hpp"
 
-// DetectionResult 只存储最终在原始图像上的坐标
 struct DetectionResult {
     int class_id;
     std::string class_name;

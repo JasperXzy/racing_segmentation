@@ -737,23 +737,33 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
 
             // 计算掩码
             std::vector<float>& mask_coeffs = nms_maskes[cls_id][i];
-            cv::Mat mask_mat(mask_h, mask_w, CV_32F);
+            cv::Mat proto_mat(H_4 * W_4, mces, CV_32F, proto.data());
+            cv::Mat mask_coeffs_mat(1, mces, CV_32F, mask_coeffs.data());
 
-            #pragma omp parallel for
-            for (int r = 0; r < mask_h; ++r) {
-                for (int c = 0; c < mask_w; ++c) {
-                    float sum = 0.0f;
-                    int proto_y = static_cast<int>((r + y1_model) / 4);
-                    int proto_x = static_cast<int>((c + x1_model) / 4);
-                    if (proto_y < H_4 && proto_x < W_4) {
-                        for (int k = 0; k < mces; ++k) {
-                           sum += mask_coeffs[k] * proto[(proto_y * W_4 + proto_x) * mces + k];
-                        }
-                    }
-                    mask_mat.at<float>(r, c) = 1.0f / (1.0f + std::exp(-sum));
-                }
-            }
-            
+            cv::Mat matmul_result = proto_mat * mask_coeffs_mat.t();
+
+            cv::Mat activation_map = matmul_result.reshape(1, H_4);
+
+            cv::Mat sigmoid_map;
+            cv::exp(-activation_map, sigmoid_map);
+            sigmoid_map = 1.0 / (1.0 + sigmoid_map);
+
+            int crop_x = static_cast<int>(x1_model / 4);
+            int crop_y = static_cast<int>(y1_model / 4);
+            int crop_w = static_cast<int>(mask_w / 4);
+            int crop_h = static_cast<int>(mask_h / 4);
+
+            crop_w = std::min(crop_w, W_4 - crop_x);
+            crop_h = std::min(crop_h, H_4 - crop_y);
+
+            if (crop_w <= 0 || crop_h <= 0) continue; // 如果裁剪区域无效则跳过
+
+            cv::Rect crop_roi(crop_x, crop_y, crop_w, crop_h);
+            cv::Mat cropped_sigmoid_map = sigmoid_map(crop_roi);
+
+            cv::Mat mask_mat;
+            cv::resize(cropped_sigmoid_map, mask_mat, cv::Size(mask_w, mask_h), 0, 0, cv::INTER_LINEAR);
+
             cv::Mat binary_mask;
             cv::threshold(mask_mat, binary_mask, 0.5, 255, cv::THRESH_BINARY);
             binary_mask.convertTo(binary_mask, CV_8U);
