@@ -95,6 +95,10 @@ int main(int argc, char * argv[])
         std::cerr << "[ERROR] Failed to load detector model." << std::endl;
         return -1;
     }
+    if (detector.init_inference_buffers() != 0) {
+        std::cerr << "[ERROR] Failed to initialize inference buffers." << std::endl;
+        return -1;
+    }
     std::cout << "[INFO] Racing Segmentation Detector initialized successfully." << std::endl;
     std::cout << "==========================================================" << std::endl;
 

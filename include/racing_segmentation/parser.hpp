@@ -33,12 +33,14 @@ class RacingSegmentation
 public:
     RacingSegmentation() = default;
     ~RacingSegmentation();
-
+    
     int load_config();
     int load_bin_model();
     int detect(uint8_t* ynv12, int original_w, int original_h, std::vector<DetectionResult>& results);
     void convert_to_ros_msg(const std::vector<DetectionResult>& results, ai_msgs::msg::PerceptionTargets& msg) const;
     int release_model();
+    int init_inference_buffers();
+    int release_inference_buffers();
 
 private:
     std::string model_file;
@@ -57,6 +59,8 @@ private:
     hbPackedDNNHandle_t packed_dnn_handle = nullptr;
     hbDNNHandle_t dnn_handle = nullptr;
     hbDNNTensorProperties input_properties;
+    hbDNNTensor input_tensor;
+    hbDNNTensor* output_tensors;
     int32_t input_W = 0;
     int32_t input_H = 0;
     int32_t output_count = 0;
