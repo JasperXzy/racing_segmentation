@@ -307,43 +307,13 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     std::vector<std::vector<float>> scores(class_num);
     std::vector<std::vector<std::vector<float>>> maskes(class_num);
 
-    // 3.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
-
-    if (output[order[9]].properties.quantiType != SCALE)
-    {
-        std::cout << "[Error] output[order[9]] QuantiType is not SCALE, please check!" << std::endl;
-        return -1;
-    }
-
-    // 3.2 对缓存的BPU内存进行刷新
-    hbSysFlushMem(&(output[order[9]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
-
-    // 3.3 将BPU推理完的内存地址转换为对应类型的指针
-    auto *proto_data = reinterpret_cast<int16_t *>(output[order[9]].sysMem[0].virAddr);
-    float proto_scale_data = output[order[9]].properties.scale.scaleData[0];
-    
-    // 3.4 反量化
-    std::vector<float> proto(H_4 * W_4 * mces);
-
-    #pragma omp parallel for
-    for (int h = 0; h < H_4; h++) {
-        for (int w = 0; w < W_4; w++) {
-            for (int c = 0; c < mces; c++) {
-                 int index = (h * W_4 + w) * mces + c;
-                 proto[index] = static_cast<float>(proto_data[index]) * proto_scale_data;
-            }
-        }
-    }
-    profiler.stop("3.1_Post_Proto_Dequant");
-    profiler.count("3.1_Post_Proto_Dequant");
-    
-    // 4. 小目标特征图
+    // 3. 小目标特征图
     profiler.start("3.2_Post_Decode_Heads");
     // output[order[0]]: (1, H // 8,  W // 8,  class_num)
     // output[order[1]]: (1, H // 8,  W // 8,  4 * reg)
     // output[order[2]]: (1, H // 8,  W // 8,  mces)
 
-    // 4.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    // 3.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[0]].properties.quantiType != NONE)
     {
         std::cout << "[Error] output[order[0]] QuantiType is not NONE, please check!" << std::endl;
@@ -360,12 +330,12 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
         return -1;
     }
 
-    // 4.2 对缓存的BPU内存进行刷新
+    // 3.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[0]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[1]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[2]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
-    // 4.3 将BPU推理完的内存地址转换为对应类型的指针
+    // 3.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *s_cls_raw = reinterpret_cast<float *>(output[order[0]].sysMem[0].virAddr);
     auto *s_bbox_raw = reinterpret_cast<int32_t *>(output[order[1]].sysMem[0].virAddr);
     auto *s_bbox_scale = reinterpret_cast<float *>(output[order[1]].properties.scale.scaleData);
@@ -375,14 +345,14 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     {
         for (int w = 0; w < W_8; w++)
         {
-            // 4.4 取对应H和W位置的C通道, 记为数组的形式
+            // 3.4 取对应H和W位置的C通道, 记为数组的形式
             // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
             // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
             float *cur_s_cls_raw = s_cls_raw;
             int32_t *cur_s_bbox_raw = s_bbox_raw;
             int32_t *cur_s_mces_raw = s_mces_raw;
 
-            // 4.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            // 3.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
             int cls_id = 0;
             for (int i = 1; i < class_num; i++)
             {
@@ -392,7 +362,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 }
             }
 
-            // 4.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            // 3.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
             if (cur_s_cls_raw[cls_id] < CONF_THRES_RAW)
             {
                 s_cls_raw += class_num;
@@ -401,10 +371,10 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 continue;
             }
 
-            // 4.7 计算这个目标的分数
+            // 3.7 计算这个目标的分数
             float score = 1 / (1 + std::exp(-cur_s_cls_raw[cls_id]));
 
-            // 4.8 对bbox_raw信息进行反量化, DFL计算
+            // 3.8 对bbox_raw信息进行反量化, DFL计算
             float ltrb[4], sum, dfl;
             for (int i = 0; i < 4; i++)
             {
@@ -420,7 +390,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 ltrb[i] /= sum;
             }
 
-            // 4.9 剔除不合格的框
+            // 3.9 剔除不合格的框
             if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
             {
                 s_cls_raw += class_num;
@@ -429,13 +399,13 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 continue;
             }
 
-            // 4.10 dist 2 bbox (ltrb 2 xyxy)
+            // 3.10 dist 2 bbox (ltrb 2 xyxy)
             float x1 = (w + 0.5 - ltrb[0]) * 8.0;
             float y1 = (h + 0.5 - ltrb[1]) * 8.0;
             float x2 = (w + 0.5 + ltrb[2]) * 8.0;
             float y2 = (h + 0.5 + ltrb[3]) * 8.0;
 
-            // 4.11 对应类别加入到对应的std::vector中
+            // 3.11 对应类别加入到对应的std::vector中
             bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
             scores[cls_id].push_back(score);
 
@@ -453,12 +423,12 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
         }
     }
 
-    // 5. 中目标特征图
+    // 4. 中目标特征图
     // output[order[3]]: (1, H // 16,  W // 16,  class_num)
     // output[order[4]]: (1, H // 16,  W // 16,  4 * reg)
     // output[order[5]]: (1, H // 16,  W // 16,  mces)
 
-    // 5.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    // 4.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[3]].properties.quantiType != NONE)
     {
         std::cout << "[Error] output[order[3]] QuantiType is not NONE, please check!" << std::endl;
@@ -475,12 +445,12 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
         return -1;
     }
 
-    // 5.2 对缓存的BPU内存进行刷新
+    // 4.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[3]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[4]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[5]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
-    // 5.3 将BPU推理完的内存地址转换为对应类型的指针
+    // 4.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *m_cls_raw = reinterpret_cast<float *>(output[order[3]].sysMem[0].virAddr);
     auto *m_bbox_raw = reinterpret_cast<int32_t *>(output[order[4]].sysMem[0].virAddr);
     auto *m_bbox_scale = reinterpret_cast<float *>(output[order[4]].properties.scale.scaleData);
@@ -491,14 +461,14 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     {
         for (int w = 0; w < W_16; w++)
         {
-            // 5.4 取对应H和W位置的C通道, 记为数组的形式
+            // 4.4 取对应H和W位置的C通道, 记为数组的形式
             // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
             // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
             float *cur_m_cls_raw = m_cls_raw;
             int32_t *cur_m_bbox_raw = m_bbox_raw;
             int32_t *cur_m_mces_raw = m_mces_raw;
 
-            // 5.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            // 4.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
             int cls_id = 0;
             for (int i = 1; i < class_num; i++)
             {
@@ -508,7 +478,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 }
             }
 
-            // 5.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            // 4.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
             if (cur_m_cls_raw[cls_id] < CONF_THRES_RAW)
             {
                 m_cls_raw += class_num;
@@ -517,10 +487,10 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 continue;
             }
 
-            // 5.7 计算这个目标的分数
+            // 4.7 计算这个目标的分数
             float score = 1 / (1 + std::exp(-cur_m_cls_raw[cls_id]));
 
-            // 5.8 对bbox_raw信息进行反量化, DFL计算
+            // 4.8 对bbox_raw信息进行反量化, DFL计算
             float ltrb[4], sum, dfl;
             for (int i = 0; i < 4; i++)
             {
@@ -536,7 +506,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 ltrb[i] /= sum;
             }
 
-            // 5.9 剔除不合格的框
+            // 4.9 剔除不合格的框
             if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
             {
                 m_cls_raw += class_num;
@@ -545,13 +515,13 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 continue;
             }
 
-            // 5.10 dist 2 bbox (ltrb 2 xyxy)
+            // 4.10 dist 2 bbox (ltrb 2 xyxy)
             float x1 = (w + 0.5 - ltrb[0]) * 16.0;
             float y1 = (h + 0.5 - ltrb[1]) * 16.0;
             float x2 = (w + 0.5 + ltrb[2]) * 16.0;
             float y2 = (h + 0.5 + ltrb[3]) * 16.0;
 
-            // 5.11 对应类别加入到对应的std::vector中
+            // 4.11 对应类别加入到对应的std::vector中
             bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
             scores[cls_id].push_back(score);
 
@@ -569,12 +539,12 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
         }
     }
 
-    // 6. 大目标特征图
+    // 5. 大目标特征图
     // output[order[6]]: (1, H // 32,  W // 32,  class_num)
     // output[order[7]]: (1, H // 32,  W // 32,  4 * reg)
     // output[order[8]]: (1, H // 32,  W // 16,  mces)
 
-    // 6.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    // 5.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
     if (output[order[6]].properties.quantiType != NONE)
     {
         std::cout << "[Error] output[order[6]] QuantiType is not NONE, please check!" << std::endl;
@@ -591,12 +561,12 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
         return -1;
     }
 
-    // 6.2 对缓存的BPU内存进行刷新
+    // 5.2 对缓存的BPU内存进行刷新
     hbSysFlushMem(&(output[order[6]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[7]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
     hbSysFlushMem(&(output[order[8]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
 
-    // 6.3 将BPU推理完的内存地址转换为对应类型的指针
+    // 5.3 将BPU推理完的内存地址转换为对应类型的指针
     auto *l_cls_raw = reinterpret_cast<float *>(output[order[6]].sysMem[0].virAddr);
     auto *l_bbox_raw = reinterpret_cast<int32_t *>(output[order[7]].sysMem[0].virAddr);
     auto *l_bbox_scale = reinterpret_cast<float *>(output[order[7]].properties.scale.scaleData);
@@ -607,14 +577,14 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     {
         for (int w = 0; w < W_32; w++)
         {
-            // 6.4 取对应H和W位置的C通道, 记为数组的形式
+            // 5.4 取对应H和W位置的C通道, 记为数组的形式
             // cls对应class_num个分数RAW值, 也就是Sigmoid计算之前的值，这里利用函数单调性先筛选, 再计算
             // bbox对应4个坐标乘以reg的RAW值, 也就是DFL计算之前的值, 仅仅分数合格了, 才会进行这部分的计算
             float *cur_l_cls_raw = l_cls_raw;
             int32_t *cur_l_bbox_raw = l_bbox_raw;
             int32_t *cur_l_mces_raw = l_mces_raw;
 
-            // 6.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
+            // 5.5 找到分数的最大值索引, 如果最大值小于阈值，则舍去
             int cls_id = 0;
             for (int i = 1; i < class_num; i++)
             {
@@ -624,7 +594,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 }
             }
 
-            // 6.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
+            // 5.6 不合格则直接跳过, 避免无用的反量化, DFL和dist2bbox计算
             if (cur_l_cls_raw[cls_id] < CONF_THRES_RAW)
             {
                 l_cls_raw += class_num;
@@ -633,10 +603,10 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 continue;
             }
 
-            // 6.7 计算这个目标的分数
+            // 5.7 计算这个目标的分数
             float score = 1 / (1 + std::exp(-cur_l_cls_raw[cls_id]));
 
-            // 6.8 对bbox_raw信息进行反量化, DFL计算
+            // 5.8 对bbox_raw信息进行反量化, DFL计算
             float ltrb[4], sum, dfl;
             for (int i = 0; i < 4; i++)
             {
@@ -652,7 +622,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 ltrb[i] /= sum;
             }
 
-            // 6.9 剔除不合格的框
+            // 5.9 剔除不合格的框
             if (ltrb[2] + ltrb[0] <= 0 || ltrb[3] + ltrb[1] <= 0)
             {
                 l_cls_raw += class_num;
@@ -661,13 +631,13 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
                 continue;
             }
 
-            // 6.10 dist 2 bbox (ltrb 2 xyxy)
+            // 5.10 dist 2 bbox (ltrb 2 xyxy)
             float x1 = (w + 0.5 - ltrb[0]) * 32.0;
             float y1 = (h + 0.5 - ltrb[1]) * 32.0;
             float x2 = (w + 0.5 + ltrb[2]) * 32.0;
             float y2 = (h + 0.5 + ltrb[3]) * 32.0;
 
-            // 6.11 对应类别加入到对应的std::vector中
+            // 5.11 对应类别加入到对应的std::vector中
             bboxes[cls_id].push_back(cv::Rect2d(x1, y1, x2 - x1, y2 - y1));
             scores[cls_id].push_back(score);
 
@@ -687,7 +657,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     profiler.stop("3.2_Post_Decode_Heads");
     profiler.count("3.2_Post_Decode_Heads");
 
-    // 7. 使用OpenCV的NMS进行过滤
+    // 6. 使用OpenCV的NMS进行过滤
     profiler.start("3.3_Post_NMS");
     std::vector<std::vector<cv::Rect2d>> nms_bboxes(class_num);
     std::vector<std::vector<float>> nms_scores(class_num);
@@ -707,96 +677,112 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     profiler.stop("3.3_Post_NMS");
     profiler.count("3.3_Post_NMS");
 
-    // 8. 将NMS后的坐标转换为原始图像上的坐标
-    profiler.start("3.4_Post_Coord_And_MaskGen");
 
+    bool needs_mask_generation = false;
+    for (int cls_id = 0; cls_id < class_num; ++cls_id) {
+        if (!nms_bboxes[cls_id].empty() && cls_names_list[cls_id] == "line") {
+            needs_mask_generation = true;
+            break; // 只要找到一个 line，就可以停止搜索了
+        }
+    }
+
+    std::vector<float> proto;
+    if (needs_mask_generation) {
+        profiler.start("3.4_Post_Proto_Dequant");
+        // 7.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+        if (output[order[9]].properties.quantiType != SCALE) {
+            std::cout << "[Error] output[order[9]] QuantiType is not SCALE, please check!" << std::endl;
+            return -1;
+        }
+
+        // 7.2 对缓存的BPU内存进行刷新
+        hbSysFlushMem(&(output[order[9]].sysMem[0]), HB_SYS_MEM_CACHE_INVALIDATE);
+
+        // 7.3 将BPU推理完的内存地址转换为对应类型的指针
+        auto *proto_data = reinterpret_cast<int16_t *>(output[order[9]].sysMem[0].virAddr);
+        float proto_scale_data = output[order[9]].properties.scale.scaleData[0];
+        
+        // 7.4 反量化
+        proto.resize(H_4 * W_4 * mces);
+
+        #pragma omp parallel for
+        for (int h = 0; h < H_4; h++) {
+            for (int w = 0; w < W_4; w++) {
+                for (int c = 0; c < mces; c++) {
+                    int index = (h * W_4 + w) * mces + c;
+                    proto[index] = static_cast<float>(proto_data[index]) * proto_scale_data;
+                }
+            }
+        }
+        profiler.stop("3.4_Post_Proto_Dequant");
+        profiler.count("3.4_Post_Proto_Dequant");
+    }
+
+    // 8. 将NMS后的坐标转换为原始图像上的坐标
+    profiler.start("3.5_Post_Coord_And_MaskGen");
     for (int cls_id = 0; cls_id < class_num; cls_id++)
     {
-        // 获取当前类别名称
         const std::string& class_name = cls_names_list[cls_id];
-        // 只有line类别需要生成掩码
         bool generate_mask = (class_name == "line");
-
         for (size_t i = 0; i < nms_bboxes[cls_id].size(); i++)
         {
             DetectionResult res;
             res.class_id = cls_id;
             res.class_name = class_name;
             res.score = nms_scores[cls_id][i];
-
-            // 8.1 总是计算边界框在原始图像上的坐标
             const cv::Rect2d& box_on_model = nms_bboxes[cls_id][i];
-            
             float original_box_x = (box_on_model.x - pad_x) / scale;
             float original_box_y = (box_on_model.y - pad_y) / scale;
             float original_box_width = box_on_model.width / scale;
             float original_box_height = box_on_model.height / scale;
-
             res.box = cv::Rect2f(original_box_x, original_box_y, original_box_width, original_box_height);
             
-            // 8.2 条件生成掩码
             if (generate_mask)
             {
-                // 裁剪 box 到模型输入图像边界内
+                // 由于我们已经在外面检查了 needs_mask_generation，如果能进入这个if，说明 proto 向量已经被正确计算了
                 float x1_model = std::max(0.0, box_on_model.x);
                 float y1_model = std::max(0.0, box_on_model.y);
                 float x2_model = std::min(static_cast<double>(input_W), x1_model + box_on_model.width);
                 float y2_model = std::min(static_cast<double>(input_H), y1_model + box_on_model.height);
                 int mask_w = static_cast<int>(x2_model - x1_model);
                 int mask_h = static_cast<int>(y2_model - y1_model);
-
                 if (mask_h <= 0 || mask_w <= 0) {
-                    // 即使是 line，如果box无效也无法生成掩码，直接添加box结果
                     results.push_back(res);
                     continue;
                 }
-
-                // 计算掩码
                 std::vector<float>& mask_coeffs = nms_maskes[cls_id][i];
                 cv::Mat proto_mat(H_4 * W_4, mces, CV_32F, proto.data());
                 cv::Mat mask_coeffs_mat(1, mces, CV_32F, mask_coeffs.data());
-
                 cv::Mat matmul_result = proto_mat * mask_coeffs_mat.t();
-
                 cv::Mat activation_map = matmul_result.reshape(1, H_4);
-
                 cv::Mat sigmoid_map;
                 cv::exp(-activation_map, sigmoid_map);
                 sigmoid_map = 1.0 / (1.0 + sigmoid_map);
-
                 int crop_x = static_cast<int>(x1_model / 4);
                 int crop_y = static_cast<int>(y1_model / 4);
                 int crop_w = static_cast<int>(mask_w / 4);
                 int crop_h = static_cast<int>(mask_h / 4);
-
                 crop_w = std::min(crop_w, W_4 - crop_x);
                 crop_h = std::min(crop_h, H_4 - crop_y);
-
                 if (crop_w <= 0 || crop_h <= 0) {
-                     // 裁剪区域无效，无法生成掩码，直接添加box结果
                     results.push_back(res);
                     continue;
                 }
-
                 cv::Rect crop_roi(crop_x, crop_y, crop_w, crop_h);
                 cv::Mat cropped_sigmoid_map = sigmoid_map(crop_roi);
-
                 cv::Mat mask_mat;
                 cv::resize(cropped_sigmoid_map, mask_mat, cv::Size(mask_w, mask_h), 0, 0, cv::INTER_LINEAR);
-
                 cv::Mat binary_mask;
                 cv::threshold(mask_mat, binary_mask, 0.5, 255, cv::THRESH_BINARY);
                 binary_mask.convertTo(binary_mask, CV_8U);
-                
                 res.mask = binary_mask;
             }
-            // 8.3 添加最终结果到列表
             results.push_back(res);
         }
     }
-    profiler.stop("3.4_Post_Coord_And_MaskGen");
-    profiler.count("3.4_Post_Coord_And_MaskGen");
-
+    profiler.stop("3.5_Post_Coord_And_MaskGen");
+    profiler.count("3.5_Post_Coord_And_MaskGen");
+    
     profiler.stop("3_Postprocess_All");
     profiler.count("3_Postprocess_All");
 
