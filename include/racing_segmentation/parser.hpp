@@ -18,6 +18,7 @@
 #include "ai_msgs/msg/perception_targets.hpp"
 #include "geometry_msgs/msg/point32.hpp"
 #include "sensor_msgs/msg/region_of_interest.hpp"
+#include "racing_segmentation/profiler.hpp"
 
 // DetectionResult 只存储最终在原始图像上的坐标
 struct DetectionResult {
@@ -36,7 +37,7 @@ public:
     
     int load_config();
     int load_bin_model();
-    int detect(uint8_t* ynv12, int original_w, int original_h, std::vector<DetectionResult>& results);
+    int detect(uint8_t* ynv12, std::vector<DetectionResult>& results, int pad_x, int pad_y, float scale, SimpleProfiler& profiler);
     void convert_to_ros_msg(const std::vector<DetectionResult>& results, ai_msgs::msg::PerceptionTargets& msg) const;
     int release_model();
     int init_inference_buffers();
