@@ -60,7 +60,7 @@ private:
     hbDNNHandle_t dnn_handle = nullptr;
     hbDNNTensorProperties input_properties;
     hbDNNTensor input_tensor;
-    hbDNNTensor* output_tensors;
+    hbDNNTensor* output;
     int32_t input_W = 0;
     int32_t input_H = 0;
     int32_t output_count = 0;

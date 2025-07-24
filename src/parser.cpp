@@ -283,7 +283,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, int original_w, int original_h, s
     hbDNNTaskHandle_t task_handle = nullptr;
     hbDNNInferCtrlParam infer_ctrl_param;
     HB_DNN_INITIALIZE_INFER_CTRL_PARAM(&infer_ctrl_param);
-    hbDNNInfer(&task_handle, &output_tensors, &input_tensor, dnn_handle, &infer_ctrl_param);
+    hbDNNInfer(&task_handle, &output, &input_tensor, dnn_handle, &infer_ctrl_param);
     hbDNNWaitTaskDone(task_handle, 0);
 
     // 后处理
@@ -758,7 +758,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, int original_w, int original_h, s
         }
     }
 
-    // 释放资源
+    // 9. 释放资源
     hbDNNReleaseTask(task_handle);
 
     return 0;
@@ -799,7 +799,7 @@ void RacingSegmentation::convert_to_ros_msg(const std::vector<DetectionResult>& 
                 target.points.push_back(point_set);
             }
         }
-        
+
         msg.targets.push_back(target);
     }
 }
@@ -818,15 +818,17 @@ int RacingSegmentation::release_model()
 
 int RacingSegmentation::init_inference_buffers() {
     input_tensor.properties = input_properties;
-    RDK_CHECK(hbSysAllocCachedMem(&input_tensor.sysMem[0], int(3 * input_H * input_W / 2)));
+    rdk_check_success(hbSysAllocCachedMem(&input_tensor.sysMem[0], int(3 * input_H * input_W / 2)), 
+                      "hbSysAllocCachedMem for input tensor failed");
 
-    output_tensors = new hbDNNTensor[output_count];
+    output = new hbDNNTensor[output_count];
     for (int i = 0; i < output_count; i++) {
-        hbDNNTensorProperties &output_properties = output_tensors[i].properties;
+        hbDNNTensorProperties &output_properties = output[i].properties;
         hbDNNGetOutputTensorProperties(&output_properties, dnn_handle, i);
         int out_aligned_size = output_properties.alignedByteSize;
-        hbSysMem &mem = output_tensors[i].sysMem[0];
-        RDK_CHECK(hbSysAllocCachedMem(&mem, out_aligned_size));
+        hbSysMem &mem = output[i].sysMem[0];
+        rdk_check_success(hbSysAllocCachedMem(&mem, out_aligned_size), 
+                          "hbSysAllocCachedMem for output tensor failed");
     }
     return 0;
 }
@@ -836,14 +838,14 @@ int RacingSegmentation::release_inference_buffers() {
         hbSysFreeMem(&(input_tensor.sysMem[0]));
         input_tensor.sysMem[0].virAddr = nullptr;
     }
-    if (output_tensors) {
+    if (output) {
         for (int i = 0; i < output_count; i++) {
-            if (output_tensors[i].sysMem[0].virAddr) {
-                hbSysFreeMem(&(output_tensors[i].sysMem[0]));
+            if (output[i].sysMem[0].virAddr) {
+                hbSysFreeMem(&(output[i].sysMem[0]));
             }
         }
-        delete[] output_tensors;
-        output_tensors = nullptr;
+        delete[] output;
+        output = nullptr;
     }
     return 0;
 }
