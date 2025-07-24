@@ -271,22 +271,29 @@ int RacingSegmentation::load_bin_model()
     return 0;
 }
 
-int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& results, int pad_x, int pad_y, float scale)
+int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& results, int pad_x, int pad_y, float scale, SimpleProfiler& profiler)
 {
     results.clear();
 
     // 1. 准备输入输出和推理
+    profiler.start("1_Memcpy_And_Flush");
     memcpy(input_tensor.sysMem[0].virAddr, ynv12, int(3 * input_H * input_W / 2));
     hbSysFlushMem(&input_tensor.sysMem[0], HB_SYS_MEM_CACHE_CLEAN);
+    profiler.stop("1_Memcpy_And_Flush");
+    profiler.count("1_Memcpy_And_Flush");
     
     // 2. 执行推理
+    profiler.start("2_Inference");
     hbDNNTaskHandle_t task_handle = nullptr;
     hbDNNInferCtrlParam infer_ctrl_param;
     HB_DNN_INITIALIZE_INFER_CTRL_PARAM(&infer_ctrl_param);
     hbDNNInfer(&task_handle, &output, &input_tensor, dnn_handle, &infer_ctrl_param);
     hbDNNWaitTaskDone(task_handle, 0);
+    profiler.stop("2_Inference");
+    profiler.count("2_Inference");
 
     // 后处理
+    profiler.start("3_Postprocess_All");
     // 在函数内部计算维度
     const int32_t H_4 = input_H / 4, W_4 = input_W / 4;
     const int32_t H_8 = input_H / 8, W_8 = input_W / 8;
@@ -299,6 +306,7 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     std::vector<std::vector<std::vector<float>>> maskes(class_num);
 
     // 3.1 检查反量化类型是否符合RDK Model Zoo的README导出的bin模型规范
+    profiler.start("3.1_Post_Proto_Dequant");
     if (output[order[9]].properties.quantiType != SCALE)
     {
         std::cout << "[Error] output[order[9]] QuantiType is not SCALE, please check!" << std::endl;
@@ -325,8 +333,11 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
             }
         }
     }
+    profiler.stop("3.1_Post_Proto_Dequant");
+    profiler.count("3.1_Post_Proto_Dequant");
     
     // 4. 小目标特征图
+    profiler.start("3.2_Post_Decode_Heads");
     // output[order[0]]: (1, H // 8,  W // 8,  class_num)
     // output[order[1]]: (1, H // 8,  W // 8,  4 * reg)
     // output[order[2]]: (1, H // 8,  W // 8,  mces)
@@ -672,8 +683,11 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
             l_mces_raw += mces;
         }
     }
+    profiler.stop("3.2_Post_Decode_Heads");
+    profiler.count("3.2_Post_Decode_Heads");
 
     // 7. 使用OpenCV的NMS进行过滤
+    profiler.start("3.3_Post_NMS");
     std::vector<std::vector<cv::Rect2d>> nms_bboxes(class_num);
     std::vector<std::vector<float>> nms_scores(class_num);
     std::vector<std::vector<std::vector<float>>> nms_maskes(class_num);
@@ -689,10 +703,13 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
             nms_maskes[cls_id].push_back(maskes[cls_id][idx]);
         }
     }
+    profiler.stop("3.3_Post_NMS");
+    profiler.count("3.3_Post_NMS");
 
     // 8. 将NMS后的坐标转换为原始图像上的坐标
     // 8.1 计算缩放比例和填充量
     // input_W 和 input_H 是模型输入尺寸
+    profiler.start("3.4_Post_Coord_And_MaskGen");
     for (int cls_id = 0; cls_id < class_num; cls_id++)
     {
         for (size_t i = 0; i < nms_bboxes[cls_id].size(); i++)
@@ -751,6 +768,11 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
             results.push_back(res);
         }
     }
+    profiler.stop("3.4_Post_Coord_And_MaskGen");
+    profiler.count("3.4_Post_Coord_And_MaskGen");
+
+    profiler.stop("3_Postprocess_All");
+    profiler.count("3_Postprocess_All");
 
     // 9. 释放资源
     hbDNNReleaseTask(task_handle);
