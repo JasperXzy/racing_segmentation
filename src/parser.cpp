@@ -708,14 +708,23 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
     profiler.count("3.3_Post_NMS");
 
     // 8. 将NMS后的坐标转换为原始图像上的坐标
-    // 8.1 计算缩放比例和填充量
-    // input_W 和 input_H 是模型输入尺寸
     profiler.start("3.4_Post_Coord_And_MaskGen");
+
     for (int cls_id = 0; cls_id < class_num; cls_id++)
     {
+        // 获取当前类别名称
+        const std::string& class_name = cls_names_list[cls_id];
+        // 只有line类别需要生成掩码
+        bool generate_mask = (class_name == "line");
+
         for (size_t i = 0; i < nms_bboxes[cls_id].size(); i++)
         {
-            // 8.2 将 NMS 后的模型坐标框进行逆变换
+            DetectionResult res;
+            res.class_id = cls_id;
+            res.class_name = class_name;
+            res.score = nms_scores[cls_id][i];
+
+            // 8.1 总是计算边界框在原始图像上的坐标
             const cv::Rect2d& box_on_model = nms_bboxes[cls_id][i];
             
             float original_box_x = (box_on_model.x - pad_x) / scale;
@@ -723,59 +732,65 @@ int RacingSegmentation::detect(uint8_t* ynv12, std::vector<DetectionResult>& res
             float original_box_width = box_on_model.width / scale;
             float original_box_height = box_on_model.height / scale;
 
-            cv::Rect2f final_box(original_box_x, original_box_y, original_box_width, original_box_height);
+            res.box = cv::Rect2f(original_box_x, original_box_y, original_box_width, original_box_height);
             
-            // 裁剪 box 到原始图像边界内
-            float x1_model = std::max(0.0, box_on_model.x);
-            float y1_model = std::max(0.0, box_on_model.y);
-            float x2_model = std::min(static_cast<double>(input_W), x1_model + box_on_model.width);
-            float y2_model = std::min(static_cast<double>(input_H), y1_model + box_on_model.height);
-            int mask_w = static_cast<int>(x2_model - x1_model);
-            int mask_h = static_cast<int>(y2_model - y1_model);
+            // 8.2 条件生成掩码
+            if (generate_mask)
+            {
+                // 裁剪 box 到模型输入图像边界内
+                float x1_model = std::max(0.0, box_on_model.x);
+                float y1_model = std::max(0.0, box_on_model.y);
+                float x2_model = std::min(static_cast<double>(input_W), x1_model + box_on_model.width);
+                float y2_model = std::min(static_cast<double>(input_H), y1_model + box_on_model.height);
+                int mask_w = static_cast<int>(x2_model - x1_model);
+                int mask_h = static_cast<int>(y2_model - y1_model);
 
-            if (mask_h <= 0 || mask_w <= 0) continue;
+                if (mask_h <= 0 || mask_w <= 0) {
+                    // 即使是 line，如果box无效也无法生成掩码，直接添加box结果
+                    results.push_back(res);
+                    continue;
+                }
 
-            // 计算掩码
-            std::vector<float>& mask_coeffs = nms_maskes[cls_id][i];
-            cv::Mat proto_mat(H_4 * W_4, mces, CV_32F, proto.data());
-            cv::Mat mask_coeffs_mat(1, mces, CV_32F, mask_coeffs.data());
+                // 计算掩码
+                std::vector<float>& mask_coeffs = nms_maskes[cls_id][i];
+                cv::Mat proto_mat(H_4 * W_4, mces, CV_32F, proto.data());
+                cv::Mat mask_coeffs_mat(1, mces, CV_32F, mask_coeffs.data());
 
-            cv::Mat matmul_result = proto_mat * mask_coeffs_mat.t();
+                cv::Mat matmul_result = proto_mat * mask_coeffs_mat.t();
 
-            cv::Mat activation_map = matmul_result.reshape(1, H_4);
+                cv::Mat activation_map = matmul_result.reshape(1, H_4);
 
-            cv::Mat sigmoid_map;
-            cv::exp(-activation_map, sigmoid_map);
-            sigmoid_map = 1.0 / (1.0 + sigmoid_map);
+                cv::Mat sigmoid_map;
+                cv::exp(-activation_map, sigmoid_map);
+                sigmoid_map = 1.0 / (1.0 + sigmoid_map);
 
-            int crop_x = static_cast<int>(x1_model / 4);
-            int crop_y = static_cast<int>(y1_model / 4);
-            int crop_w = static_cast<int>(mask_w / 4);
-            int crop_h = static_cast<int>(mask_h / 4);
+                int crop_x = static_cast<int>(x1_model / 4);
+                int crop_y = static_cast<int>(y1_model / 4);
+                int crop_w = static_cast<int>(mask_w / 4);
+                int crop_h = static_cast<int>(mask_h / 4);
 
-            crop_w = std::min(crop_w, W_4 - crop_x);
-            crop_h = std::min(crop_h, H_4 - crop_y);
+                crop_w = std::min(crop_w, W_4 - crop_x);
+                crop_h = std::min(crop_h, H_4 - crop_y);
 
-            if (crop_w <= 0 || crop_h <= 0) continue; // 如果裁剪区域无效则跳过
+                if (crop_w <= 0 || crop_h <= 0) {
+                     // 裁剪区域无效，无法生成掩码，直接添加box结果
+                    results.push_back(res);
+                    continue;
+                }
 
-            cv::Rect crop_roi(crop_x, crop_y, crop_w, crop_h);
-            cv::Mat cropped_sigmoid_map = sigmoid_map(crop_roi);
+                cv::Rect crop_roi(crop_x, crop_y, crop_w, crop_h);
+                cv::Mat cropped_sigmoid_map = sigmoid_map(crop_roi);
 
-            cv::Mat mask_mat;
-            cv::resize(cropped_sigmoid_map, mask_mat, cv::Size(mask_w, mask_h), 0, 0, cv::INTER_LINEAR);
+                cv::Mat mask_mat;
+                cv::resize(cropped_sigmoid_map, mask_mat, cv::Size(mask_w, mask_h), 0, 0, cv::INTER_LINEAR);
 
-            cv::Mat binary_mask;
-            cv::threshold(mask_mat, binary_mask, 0.5, 255, cv::THRESH_BINARY);
-            binary_mask.convertTo(binary_mask, CV_8U);
-
-            // 8.3 填充结果结构体，直接使用转换后的坐标
-            DetectionResult res;
-            res.class_id = cls_id;
-            res.class_name = cls_names_list[cls_id];
-            res.score = nms_scores[cls_id][i];
-            res.box = final_box;
-            res.mask = binary_mask;
-            
+                cv::Mat binary_mask;
+                cv::threshold(mask_mat, binary_mask, 0.5, 255, cv::THRESH_BINARY);
+                binary_mask.convertTo(binary_mask, CV_8U);
+                
+                res.mask = binary_mask;
+            }
+            // 8.3 添加最终结果到列表
             results.push_back(res);
         }
     }
