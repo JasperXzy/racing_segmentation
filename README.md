@@ -7,6 +7,7 @@ colcon build --packages-select racing_segmentation
 ```bash
 source install/setup.bash
 ros2 launch racing_segmentation racing_segmentation.launch.py
+ros2 launch racing_segmentation racing_segmentation_web.launch.py
 ```
 
 ## 修改优化后的 Attention 类
