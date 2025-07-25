@@ -34,6 +34,8 @@ private:
     void image_callback(const hbm_img_msgs::msg::HbmMsg1080P::ConstSharedPtr msg)
     {
         profiler_.start("Total_Callback"); 
+
+        auto input_timestamp = msg->time_stamp;
         frame_count_++;
 
         const int src_w = 640; 
@@ -58,7 +60,7 @@ private:
         profiler_.count("B_Detect_Total");
  
         profiler_.start("C_Publish_Results");
-        publish_results(detection_results);
+        publish_results(detection_results, input_timestamp);
         profiler_.stop("C_Publish_Results");
         profiler_.count("C_Publish_Results");
 
@@ -80,11 +82,11 @@ private:
         }
     }
 
-    void publish_results(const std::vector<DetectionResult>& results)
+    void publish_results(const std::vector<DetectionResult>& results, const builtin_interfaces::msg::Time& timestamp)
     {
         auto targets_msg = std::make_unique<ai_msgs::msg::PerceptionTargets>();
 
-        targets_msg->header.stamp = this->get_clock()->now();
+        targets_msg->header.stamp = timestamp;
         targets_msg->header.frame_id = "camera_optical_frame";
         
         profiler_.start("C.1_ConvertToROS_Msg");
