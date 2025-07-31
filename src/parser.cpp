@@ -808,23 +808,56 @@ void RacingSegmentation::convert_to_ros_msg(const std::vector<DetectionResult>& 
         roi.confidence = det_res.score;
         target.rois.push_back(roi);
 
-        // 填充分割掩码轮廓信息
         if (!det_res.mask.empty()) {
-            std::vector<std::vector<cv::Point>> contours;
-            cv::findContours(det_res.mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-            for (const auto& contour : contours) {
+            if (det_res.class_name == "line") {
                 ai_msgs::msg::Point point_set;
-                point_set.type = "segmentation_contour";
-                
-                for (const auto& cv_point : contour) {
-                    geometry_msgs::msg::Point32 ros_point;
-                    ros_point.x = static_cast<float>(cv_point.x);
-                    ros_point.y = static_cast<float>(cv_point.y);
-                    ros_point.z = 0.0f;
-                    point_set.point.push_back(ros_point);
+                point_set.type = "segmentation_midpoints"; 
+
+                const cv::Mat& mask = det_res.mask;
+                for (int y = 0; y < mask.rows; y += 3) {
+                    const uchar* row_ptr = mask.ptr<uchar>(y);
+                    int min_x = -1, max_x = -1;
+
+                    for (int x = 0; x < mask.cols; ++x) {
+                        if (row_ptr[x] > 0) {
+                            if (min_x == -1) {
+                                min_x = x;
+                            }
+                            max_x = x;
+                        }
+                    }
+
+                    if (min_x != -1) {
+                        float mid_x = static_cast<float>(min_x + max_x) / 2.0f;
+
+                        geometry_msgs::msg::Point32 ros_point;
+                        ros_point.x = det_res.box.x + mid_x;
+                        ros_point.y = det_res.box.y + static_cast<float>(y);
+                        ros_point.z = 0.0f;
+                        point_set.point.push_back(ros_point);
+                    }
                 }
-                target.points.push_back(point_set);
+                if (!point_set.point.empty()) {
+                    target.points.push_back(point_set);
+                }
+            } 
+            else { 
+                std::vector<std::vector<cv::Point>> contours;
+                cv::findContours(det_res.mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+                for (const auto& contour : contours) {
+                    ai_msgs::msg::Point point_set;
+                    point_set.type = "segmentation_contour";
+                    
+                    for (const auto& cv_point : contour) {
+                        geometry_msgs::msg::Point32 ros_point;
+                        ros_point.x = det_res.box.x + static_cast<float>(cv_point.x);
+                        ros_point.y = det_res.box.y + static_cast<float>(cv_point.y);
+                        ros_point.z = 0.0f;
+                        point_set.point.push_back(ros_point);
+                    }
+                    target.points.push_back(point_set);
+                }
             }
         }
 
